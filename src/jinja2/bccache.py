@@ -30,7 +30,9 @@ if t.TYPE_CHECKING:
         def set(self, key: str, value: bytes, timeout: int | None = None) -> None: ...
 
 
-bc_version = 5
+# Bump this when the generated code changes in an incompatible way, such
+# as the arguments passed to `Macro`.
+bc_version = 6
 # Magic bytes to identify Jinja bytecode cache files. Contains the
 # Python major and minor version to avoid loading incompatible bytecode
 # if a project upgrades its Python version.

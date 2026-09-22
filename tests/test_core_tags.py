@@ -459,6 +459,118 @@ class TestMacros:
         assert tmpl.module.m(1, 2, 3) == "1|2|3"
         assert tmpl.module.m(1, x=7) == "1|7|7"
 
+    def test_kwonly_arguments(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro badge(text, *, tone='info', compact) %}"
+            "[{{ text }}|{{ tone }}|{{ compact }}]{% endmacro %}"
+            "{{ badge('hi', compact=True) }}"
+            "|{{ badge('hi', tone='warn', compact=False) }}"
+        )
+        assert tmpl.render() == "[hi|info|True]|[hi|warn|False]"
+
+    def test_kwonly_defaults_self_ref(self, env):
+        tmpl = env.from_string(
+            """
+            {%- set x = 42 %}
+            {%- macro m(a, *, b=x, x=23) %}{{ a }}|{{ b }}|{{ x }}{% endmacro -%}
+        """
+        )
+        assert tmpl.module.m(1) == "1||23"
+        assert tmpl.module.m(1, x=7) == "1|7|7"
+        assert tmpl.module.m(1, b=5) == "1|5|23"
+
+    def test_kwonly_default_not_shared(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro m(*, a=[]) %}{% set _ = a.append(1) %}"
+            "{{ a|length }}{% endmacro %}"
+            "{{ m() }}{{ m() }}"
+        )
+        assert tmpl.render() == "11"
+
+    def test_kwonly_metadata(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro badge(text, *, tone='info', compact) %}{% endmacro %}"
+            "{% macro old(a, b=1) %}{% endmacro %}"
+        )
+        assert tmpl.module.badge.arguments == ("text",)
+        assert tmpl.module.badge.kwonly_arguments == ("tone", "compact")
+        assert tmpl.module.old.arguments == ("a", "b")
+        assert tmpl.module.old.kwonly_arguments == ()
+
+    def test_kwonly_missing_required(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, compact) %}{{ compact + 0 }}{% endmacro %}"
+            "{{ badge('hi') }}"
+        )
+        with pytest.raises(
+            UndefinedError, match="parameter 'compact' was not provided"
+        ):
+            tmpl.render()
+
+    def test_kwonly_not_positional(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro badge(text, *, tone='info') %}{% endmacro %}"
+            "{{ badge('hi', 'warn') }}"
+        )
+        with pytest.raises(TypeError, match="takes not more than 1 argument"):
+            tmpl.render()
+
+    def test_kwonly_duplicate_value(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro badge(text, *, tone='info') %}{% endmacro %}"
+            "{{ badge('hi', text='again') }}"
+        )
+        with pytest.raises(
+            TypeError, match="got multiple values for argument 'text'"
+        ):
+            tmpl.render()
+
+    def test_kwonly_duplicate_value_not_swallowed_by_kwargs(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro m(a) %}{{ kwargs }}{% endmacro %}{{ m(1, a=2) }}"
+        )
+        with pytest.raises(TypeError, match="got multiple values for argument 'a'"):
+            tmpl.render()
+
+    def test_kwonly_duplicate_star(self, env_trim):
+        with pytest.raises(
+            TemplateSyntaxError, match="macro signature contains duplicate"
+        ) as exc_info:
+            env_trim.from_string("{% macro m(a, *, b, *, c) %}{% endmacro %}")
+        assert exc_info.value.lineno == 1
+
+    def test_kwonly_default_order_free(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro m(*, a=1, b) %}{{ a }}-{{ b }}{% endmacro %}{{ m(b=2) }}"
+        )
+        assert tmpl.render() == "1-2"
+
+    def test_kwonly_special_arguments(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro m(a, *, b=2) %}"
+            "{{ a }}|{{ b }}|{{ varargs|join(',') }}|{{ kwargs['x'] }}"
+            "{% endmacro %}{{ m(1, 9, 8, x=5) }}"
+        )
+        assert tmpl.render() == "1|2|9,8|5"
+
+    def test_kwonly_call_block(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro wrap(*, prefix='') %}"
+            "[{{ prefix }}{{ caller('inner', marker='*') }}]{% endmacro %}"
+            "{% call(item, *, marker) wrap(prefix='>') %}"
+            "{{ marker }}{{ item }}{% endcall %}"
+        )
+        assert tmpl.render() == "[>*inner]"
+
+    def test_kwonly_passed_as_argument(self, env_trim):
+        tmpl = env_trim.from_string(
+            "{% macro badge(text, *, tone='info') %}"
+            "[{{ tone }}:{{ text }}]{% endmacro %}"
+            "{% macro apply(fn, val) %}{{ fn(val, tone='warn') }}{% endmacro %}"
+            "{{ apply(badge, 'hi') }}"
+        )
+        assert tmpl.render() == "[warn:hi]"
+
 
 class TestSet:
     def test_normal(self, env_trim):

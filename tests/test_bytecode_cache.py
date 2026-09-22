@@ -5,6 +5,7 @@ from jinja2.bccache import Bucket
 from jinja2.bccache import FileSystemBytecodeCache
 from jinja2.bccache import MemcachedBytecodeCache
 from jinja2.exceptions import TemplateNotFound
+from jinja2.loaders import DictLoader
 
 
 @pytest.fixture
@@ -18,6 +19,34 @@ class TestByteCodeCache:
         tmpl = env.get_template("test.html")
         assert tmpl.render().strip() == "BAR"
         pytest.raises(TemplateNotFound, env.get_template, "missing.html")
+
+    def test_macro_kwonly_roundtrip(self, tmp_path):
+        loader = DictLoader(
+            {
+                "lib": (
+                    "{% macro badge(text, *, tone='info', compact=False) %}"
+                    "[{{ tone }}:{{ text }}:{{ compact }}]{% endmacro %}"
+                ),
+                "page": (
+                    "{% from 'lib' import badge %}"
+                    "{% macro local(*, x=1) %}<{{ x }}>{% endmacro %}"
+                    "{% macro apply(fn) %}{{ fn('p', tone='warn') }}{% endmacro %}"
+                    "{{ local(x=2) }}{{ badge('a', compact=True) }}{{ apply(badge) }}"
+                ),
+            }
+        )
+        cache = FileSystemBytecodeCache(str(tmp_path))
+        env = Environment(loader=loader, bytecode_cache=cache)
+        expected = env.get_template("page").render()
+        assert expected == "<2>[info:a:True][warn:p:False]"
+        assert list(tmp_path.iterdir())
+
+        # a fresh environment loads the compiled macros from the cache
+        env = Environment(loader=loader, bytecode_cache=cache)
+        assert env.get_template("page").render() == expected
+        badge = env.get_template("lib").module.badge
+        assert badge.arguments == ("text",)
+        assert badge.kwonly_arguments == ("tone", "compact")
 
 
 class MockMemcached:

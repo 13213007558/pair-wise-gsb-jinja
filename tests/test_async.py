@@ -68,6 +68,35 @@ def test_await_and_macros(run_async_fn):
     assert rv == "[42][42]"
 
 
+def test_macro_kwonly_async(run_async_fn):
+    t = Template(
+        "{% macro badge(text, *, tone='info', compact) %}"
+        "[{{ text }}|{{ tone }}|{{ compact }}]{% endmacro %}"
+        "{{ badge('hi', compact=True) }}|{{ badge('hi', tone='warn', compact=False) }}",
+        enable_async=True,
+    )
+
+    async def func():
+        return await t.render_async()
+
+    rv = run_async_fn(func)
+    assert rv == "[hi|info|True]|[hi|warn|False]"
+
+
+def test_macro_kwonly_async_missing_required(run_async_fn):
+    t = Template(
+        "{% macro badge(text, *, compact) %}{{ compact + 0 }}{% endmacro %}"
+        "{{ badge('hi') }}",
+        enable_async=True,
+    )
+
+    async def func():
+        return await t.render_async()
+
+    with pytest.raises(UndefinedError, match="'compact' was not provided"):
+        run_async_fn(func)
+
+
 def test_async_blocks(run_async_fn):
     t = Template(
         "{% block foo %}<Test>{% endblock %}{{ self.foo() }}",

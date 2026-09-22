@@ -672,16 +672,21 @@ class Macro:
         catch_varargs: bool,
         caller: bool,
         default_autoescape: bool | None = None,
+        kwonly_arguments: t.Sequence[str] = (),
     ):
         self._environment = environment
         self._func = func
         self._argument_count = len(arguments)
         self.name = name
         self.arguments = arguments
+        self.kwonly_arguments = tuple(kwonly_arguments)
         self.catch_kwargs = catch_kwargs
         self.catch_varargs = catch_varargs
         self.caller = caller
-        self.explicit_caller = "caller" in arguments
+        self.explicit_caller = (
+            "caller" in arguments or "caller" in self.kwonly_arguments
+        )
+        self._positional_names = frozenset(arguments)
 
         if default_autoescape is None:
             if callable(environment.autoescape):
@@ -738,6 +743,26 @@ class Macro:
                 arguments.append(value)
         else:
             found_caller = self.explicit_caller
+
+        # keyword-only arguments can only be filled by name. Missing
+        # values are passed as missing so that the macro body can apply
+        # the default or raise for the required parameter.
+        for name in self.kwonly_arguments:
+            try:
+                value = kwargs.pop(name)
+            except KeyError:
+                value = missing
+            if name == "caller":
+                found_caller = True
+            arguments.append(value)
+
+        # a keyword value for an already bound positional parameter is a
+        # binding error, even if the macro catches **kwargs.
+        for name in kwargs:
+            if name != "caller" and name in self._positional_names:
+                raise TypeError(
+                    f"macro {self.name!r} got multiple values for argument {name!r}"
+                )
 
         # it's important that the order of these arguments does not change
         # if not also changed in the compiler's `function_scoping` method.

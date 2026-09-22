@@ -53,6 +53,30 @@ class TestImports:
         with pytest.raises(TemplateSyntaxError):
             test_env.from_string('{% from "foo" import %}')
 
+    def test_macro_kwonly_import(self):
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "lib": (
+                        "{% macro badge(text, *, tone='info', compact) %}"
+                        "[{{ text }}|{{ tone }}|{{ compact }}]{% endmacro %}"
+                    ),
+                }
+            )
+        )
+        t = env.from_string(
+            "{% import 'lib' as lib %}{{ lib.badge('a', compact=True) }}"
+        )
+        assert t.render() == "[a|info|True]"
+        t = env.from_string(
+            "{% from 'lib' import badge %}{{ badge('b', tone='warn', compact=False) }}"
+        )
+        assert t.render() == "[b|warn|False]"
+        assert env.get_template("lib").module.badge.kwonly_arguments == (
+            "tone",
+            "compact",
+        )
+
     def test_no_trailing_comma(self, test_env):
         with pytest.raises(TemplateSyntaxError):
             test_env.from_string('{% from "foo" import bar, %}')

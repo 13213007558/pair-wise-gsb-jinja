@@ -402,17 +402,35 @@ class Parser:
     def parse_signature(self, node: _MacroCall) -> None:
         args = node.args = []
         defaults = node.defaults = []
+        kwonlyargs = node.kwonlyargs = []
+        kw_defaults = node.kw_defaults = []
         self.stream.expect("lparen")
+        seen_star = False
+        first = True
         while self.stream.current.type != "rparen":
-            if args:
+            if not first:
                 self.stream.expect("comma")
+            first = False
+            if self.stream.current.type == "mul":
+                if seen_star:
+                    self.fail("macro signature contains duplicate '*'")
+                seen_star = True
+                next(self.stream)
+                continue
             arg = self.parse_assign_target(name_only=True)
             arg.set_ctx("param")
-            if self.stream.skip_if("assign"):
-                defaults.append(self.parse_expression())
-            elif defaults:
-                self.fail("non-default argument follows default argument")
-            args.append(arg)
+            if seen_star:
+                if self.stream.skip_if("assign"):
+                    kw_defaults.append(self.parse_expression())
+                else:
+                    kw_defaults.append(None)
+                kwonlyargs.append(arg)
+            else:
+                if self.stream.skip_if("assign"):
+                    defaults.append(self.parse_expression())
+                elif defaults:
+                    self.fail("non-default argument follows default argument")
+                args.append(arg)
         self.stream.expect("rparen")
 
     def parse_call_block(self) -> nodes.CallBlock:
@@ -422,6 +440,8 @@ class Parser:
         else:
             node.args = []
             node.defaults = []
+            node.kwonlyargs = []
+            node.kw_defaults = []
 
         call_node = self.parse_expression()
         if not isinstance(call_node, nodes.Call):

@@ -45,6 +45,8 @@ def test_complex():
         "render_title",
         [nodes.Name("title", "param")],
         [],
+        [],
+        [],
         [
             nodes.Output(
                 [
