@@ -1,5 +1,6 @@
 """Compiles nodes from the parser into Python code."""
 
+import inspect
 import typing as t
 from contextlib import contextmanager
 from functools import update_wrapper
@@ -1423,18 +1424,34 @@ class CodeGenerator(NodeVisitor):
             )
             finalize = None
 
-            if pass_arg is None:
+            if inspect.iscoroutinefunction(env_finalize):
+                if not self.environment.is_async:
+                    raise RuntimeError(
+                        "The environment's 'finalize' function is async, but"
+                        " the environment was not created with async mode"
+                        " enabled. Either pass 'enable_async=True' to the"
+                        " environment, or use a sync 'finalize' function."
+                    )
 
-                def finalize(value: t.Any) -> t.Any:  # noqa: F811
-                    return default(env_finalize(value))
+                # An async finalize can't be called at compile time, and
+                # its result must be awaited at runtime.
+                src = f"await {src}"
 
+                if pass_arg is not None:
+                    src = f"{src}{pass_arg}, "
             else:
-                src = f"{src}{pass_arg}, "
-
-                if pass_arg == "environment":
+                if pass_arg is None:
 
                     def finalize(value: t.Any) -> t.Any:  # noqa: F811
-                        return default(env_finalize(self.environment, value))
+                        return default(env_finalize(value))
+
+                else:
+                    src = f"{src}{pass_arg}, "
+
+                    if pass_arg == "environment":
+
+                        def finalize(value: t.Any) -> t.Any:  # noqa: F811
+                            return default(env_finalize(self.environment, value))
 
         self._finalize = self._FinalizeInfo(finalize, src)
         return self._finalize

@@ -220,6 +220,12 @@ class Environment:
             expression before it is output.  For example one can convert
             ``None`` implicitly into an empty string here.
 
+            If ``enable_async`` is enabled, this can be an async function,
+            its result will be awaited before it is output.
+
+            .. versionchanged:: 3.2
+                An async function can be used if ``enable_async`` is enabled.
+
         `autoescape`
             If set to ``True`` the XML/HTML autoescaping feature is enabled by
             default.  For more details about autoescaping see
