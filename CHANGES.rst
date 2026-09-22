@@ -13,6 +13,8 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   An async ``finalize`` function is awaited when used with an async
+    environment. Using one with a sync environment raises an error.
 
 
 Version 3.1.6

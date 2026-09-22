@@ -220,6 +220,10 @@ class Environment:
             expression before it is output.  For example one can convert
             ``None`` implicitly into an empty string here.
 
+            If the environment is created with ``enable_async=True``, this
+            may be a coroutine function, its result will be awaited before
+            it is output.
+
         `autoescape`
             If set to ``True`` the XML/HTML autoescaping feature is enabled by
             default.  For more details about autoescaping see

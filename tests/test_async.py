@@ -1,8 +1,12 @@
 import pytest
+from markupsafe import Markup
 
 from jinja2 import ChainableUndefined
 from jinja2 import DictLoader
 from jinja2 import Environment
+from jinja2 import pass_context
+from jinja2 import pass_environment
+from jinja2 import pass_eval_context
 from jinja2 import Template
 from jinja2.async_utils import auto_aiter
 from jinja2.exceptions import TemplateNotFound
@@ -718,3 +722,217 @@ def test_async_extend(run_async_fn, test_env_async):
 
     rv = run_async_fn(func)
     assert rv == "["
+
+
+class TestAsyncFinalize:
+    def test_finalize_awaited(self, run_async_fn):
+        async def finalize(value):
+            return f"[{value}]"
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value="x")
+
+        assert run_async_fn(func) == "[x]"
+
+    def test_no_coroutine_at_compile_time(self, run_async_fn, recwarn):
+        calls = []
+
+        async def finalize(value):
+            calls.append(value)
+            return value
+
+        env = Environment(enable_async=True, finalize=finalize)
+
+        # Compiling must not call the finalize function, which would
+        # create a coroutine that is never awaited.
+        t = env.from_string("{{ value }} {{ 'const' }}")
+
+        assert calls == []
+        assert not [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)]
+
+        async def func():
+            return await t.render_async(value="x")
+
+        assert run_async_fn(func) == "x const"
+        assert calls == ["x", "const"]
+
+    def test_constant_expression_awaited_at_runtime(self, run_async_fn):
+        async def finalize(value):
+            return f"<{value}>"
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ 'lit' }}")
+
+        async def func():
+            return await t.render_async()
+
+        assert run_async_fn(func) == "<lit>"
+
+    def test_loop_macro_and_block(self, run_async_fn):
+        async def finalize(value):
+            return f"<{value}>"
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string(
+            "{% for i in [1, 2] %}{{ i }}{% endfor %}"
+            "{% macro m(x) %}{{ x }}{% endmacro %}"
+            "{{ m(3) }}"
+            "{% block b %}{{ 4 }}{% endblock %}"
+        )
+
+        async def func():
+            return await t.render_async()
+
+        assert run_async_fn(func) == "<1><2><<3>><4>"
+
+    def test_template_data_not_finalized(self, run_async_fn):
+        async def finalize(value):
+            return type(value).__name__
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("raw{{ 1 }}data")
+
+        async def func():
+            return await t.render_async()
+
+        assert run_async_fn(func) == "rawintdata"
+
+    def test_generate_async(self, run_async_fn):
+        async def finalize(value):
+            return f"<{value}>"
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ 1 }} {{ 2 }}")
+
+        async def func():
+            return [part async for part in t.generate_async()]
+
+        assert run_async_fn(func) == ["<1>", " ", "<2>"]
+
+    def test_pass_context(self, run_async_fn):
+        @pass_context
+        async def finalize(context, value):
+            return f"{context['tag']}:{value}"
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value=1, tag="ctx")
+
+        assert run_async_fn(func) == "ctx:1"
+
+    def test_pass_eval_context(self, run_async_fn):
+        @pass_eval_context
+        async def finalize(eval_ctx, value):
+            return f"{eval_ctx.autoescape}:{value}"
+
+        env = Environment(enable_async=True, finalize=finalize, autoescape=True)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value="x")
+
+        assert run_async_fn(func) == "True:x"
+
+    def test_pass_environment(self, run_async_fn):
+        @pass_environment
+        async def finalize(environment, value):
+            return f"{environment.is_async}:{value}"
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value=2)
+
+        assert run_async_fn(func) == "True:2"
+
+    def test_markup_result_keeps_safety(self, run_async_fn):
+        async def finalize(value):
+            return Markup(f"<em>{value}</em>")
+
+        env = Environment(enable_async=True, finalize=finalize, autoescape=True)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value="x")
+
+        assert run_async_fn(func) == "<em>x</em>"
+
+    def test_str_result_escaped_with_autoescape(self, run_async_fn):
+        async def finalize(value):
+            return f"<i>{value}</i>"
+
+        env = Environment(enable_async=True, finalize=finalize, autoescape=True)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value="x")
+
+        assert run_async_fn(func) == "&lt;i&gt;x&lt;/i&gt;"
+
+    def test_sync_finalize_in_async_env(self, run_async_fn):
+        env = Environment(enable_async=True, finalize=lambda v: f"<{v}>")
+        t = env.from_string("{{ value }} {{ 'const' }}")
+
+        async def func():
+            return await t.render_async(value="x")
+
+        assert run_async_fn(func) == "<x> <const>"
+
+    def test_async_finalize_in_sync_env(self, recwarn):
+        async def finalize(value):
+            return value
+
+        env = Environment(finalize=finalize)
+
+        with pytest.raises(RuntimeError, match="finalize"):
+            env.from_string("{{ value }}")
+
+        # No coroutine was created and left unawaited.
+        assert not [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)]
+
+    def test_finalize_called_once_per_expression(self, run_async_fn):
+        calls = []
+
+        async def finalize(value):
+            calls.append(value)
+            return value
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value=5)
+
+        assert run_async_fn(func) == "5"
+        assert calls == [5]
+
+    def test_exception_propagates(self, run_async_fn):
+        async def finalize(value):
+            raise ValueError("finalize failed")
+
+        env = Environment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            await t.render_async(value=1)
+
+        with pytest.raises(ValueError, match="finalize failed"):
+            run_async_fn(func)
+
+    def test_native_async_finalize(self, run_async_fn):
+        async def finalize(value):
+            return value
+
+        env = NativeEnvironment(enable_async=True, finalize=finalize)
+        t = env.from_string("{{ value }}")
+
+        async def func():
+            return await t.render_async(value=42)
+
+        assert run_async_fn(func) == 42

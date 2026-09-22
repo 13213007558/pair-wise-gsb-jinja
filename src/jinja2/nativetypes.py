@@ -75,6 +75,9 @@ class NativeCodeGenerator(CodeGenerator):
     def _output_child_pre(
         self, node: nodes.Expr, frame: Frame, finalize: CodeGenerator._FinalizeInfo
     ) -> None:
+        if finalize.awaitable:
+            self.write("(await auto_await(")
+
         if finalize.src is not None:
             self.write(finalize.src)
 
@@ -83,6 +86,9 @@ class NativeCodeGenerator(CodeGenerator):
     ) -> None:
         if finalize.src is not None:
             self.write(")")
+
+        if finalize.awaitable:
+            self.write("))")
 
 
 class NativeEnvironment(Environment):

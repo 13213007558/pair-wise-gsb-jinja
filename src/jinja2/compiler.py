@@ -1,5 +1,6 @@
 """Compiles nodes from the parser into Python code."""
 
+import inspect
 import typing as t
 from contextlib import contextmanager
 from functools import update_wrapper
@@ -1380,6 +1381,10 @@ class CodeGenerator(NodeVisitor):
     class _FinalizeInfo(t.NamedTuple):
         const: t.Callable[..., str] | None
         src: str | None
+        # The finalize function is a coroutine function, its result
+        # must be awaited at runtime. Only possible if the environment
+        # is async.
+        awaitable: bool = False
 
     @staticmethod
     def _default_finalize(value: t.Any) -> t.Any:
@@ -1411,6 +1416,8 @@ class CodeGenerator(NodeVisitor):
         finalize = default = self._default_finalize
         src = None
 
+        awaitable = False
+
         if self.environment.finalize:
             src = "environment.finalize("
             env_finalize = self.environment.finalize
@@ -1423,20 +1430,31 @@ class CodeGenerator(NodeVisitor):
             )
             finalize = None
 
-            if pass_arg is None:
+            if pass_arg is not None:
+                src = f"{src}{pass_arg}, "
+
+            if inspect.iscoroutinefunction(env_finalize):
+                if not self.environment.is_async:
+                    raise RuntimeError(
+                        "The environment's 'finalize' function is a coroutine"
+                        " function, but the environment was not created with"
+                        " 'enable_async=True'."
+                    )
+
+                # The coroutine must be awaited at runtime, so constants
+                # can't be finalized at compile time.
+                awaitable = True
+            elif pass_arg is None:
 
                 def finalize(value: t.Any) -> t.Any:  # noqa: F811
                     return default(env_finalize(value))
 
-            else:
-                src = f"{src}{pass_arg}, "
+            elif pass_arg == "environment":
 
-                if pass_arg == "environment":
+                def finalize(value: t.Any) -> t.Any:  # noqa: F811
+                    return default(env_finalize(self.environment, value))
 
-                    def finalize(value: t.Any) -> t.Any:  # noqa: F811
-                        return default(env_finalize(self.environment, value))
-
-        self._finalize = self._FinalizeInfo(finalize, src)
+        self._finalize = self._FinalizeInfo(finalize, src, awaitable)
         return self._finalize
 
     def _output_const_repr(self, group: t.Iterable[t.Any]) -> str:
@@ -1480,6 +1498,9 @@ class CodeGenerator(NodeVisitor):
         else:
             self.write("str(")
 
+        if finalize.awaitable:
+            self.write("(await auto_await(")
+
         if finalize.src is not None:
             self.write(finalize.src)
 
@@ -1493,6 +1514,9 @@ class CodeGenerator(NodeVisitor):
 
         if finalize.src is not None:
             self.write(")")
+
+        if finalize.awaitable:
+            self.write("))")
 
     def visit_Output(self, node: nodes.Output, frame: Frame) -> None:
         # If an extends is active, don't render outside a block.
