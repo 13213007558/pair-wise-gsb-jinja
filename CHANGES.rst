@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Macros can declare keyword-only arguments after a ``*`` separator in
+    their signature, such as
+    ``{% macro badge(text, *, tone='info', compact) %}``. Keyword-only
+    arguments must be passed by name and may be required. Macro objects
+    expose their names as ``kwonlyarguments``.
 
 
 Version 3.1.6

@@ -346,14 +346,19 @@ class If(Stmt):
 
 class Macro(Stmt):
     """A macro definition.  `name` is the name of the macro, `args` a list of
-    arguments and `defaults` a list of defaults if there are any.  `body` is
-    a list of nodes for the macro body.
+    arguments and `defaults` a list of defaults if there are any.
+    `kwonlyargs` is a list of keyword-only arguments declared after a
+    star separator, `kwonlydefaults` holds their defaults aligned with
+    `kwonlyargs`, using `None` for required keyword-only arguments.
+    `body` is a list of nodes for the macro body.
     """
 
-    fields = ("name", "args", "defaults", "body")
+    fields = ("name", "args", "defaults", "kwonlyargs", "kwonlydefaults", "body")
     name: str
     args: list["Name"]
     defaults: list["Expr"]
+    kwonlyargs: list["Name"]
+    kwonlydefaults: list[t.Optional["Expr"]]
     body: list[Node]
 
 
@@ -362,10 +367,12 @@ class CallBlock(Stmt):
     the unnamed macro as `caller` argument this node holds.
     """
 
-    fields = ("call", "args", "defaults", "body")
+    fields = ("call", "args", "defaults", "kwonlyargs", "kwonlydefaults", "body")
     call: "Call"
     args: list["Name"]
     defaults: list["Expr"]
+    kwonlyargs: list["Name"]
+    kwonlydefaults: list[t.Optional["Expr"]]
     body: list[Node]
 
 

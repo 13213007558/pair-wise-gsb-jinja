@@ -68,6 +68,34 @@ def test_await_and_macros(run_async_fn):
     assert rv == "[42][42]"
 
 
+def test_macro_keyword_only_args_async(run_async_fn):
+    t = Template(
+        "{% macro badge(text, *, tone='info', compact) %}"
+        "[{{ text }}|{{ tone }}|{{ compact }}]{% endmacro %}"
+        "{{ badge('hi', compact=true) }}",
+        enable_async=True,
+    )
+
+    async def func():
+        return await t.render_async()
+
+    rv = run_async_fn(func)
+    assert rv == "[hi|info|True]"
+
+
+def test_macro_keyword_only_missing_required_async(run_async_fn):
+    t = Template(
+        "{% macro badge(*, compact) %}{{ compact }}{% endmacro %}{{ badge() }}",
+        enable_async=True,
+    )
+
+    async def func():
+        return await t.render_async()
+
+    with pytest.raises(TypeError, match="missing required keyword-only"):
+        run_async_fn(func)
+
+
 def test_async_blocks(run_async_fn):
     t = Template(
         "{% block foo %}<Test>{% endblock %}{{ self.foo() }}",

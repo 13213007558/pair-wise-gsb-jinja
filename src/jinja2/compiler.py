@@ -626,6 +626,11 @@ class CodeGenerator(NodeVisitor):
                 skip_special_params.add(arg.name)
             args.append(frame.symbols.ref(arg.name))
 
+        for arg in node.kwonlyargs:
+            if arg.name in ("kwargs", "varargs"):
+                skip_special_params.add(arg.name)
+            args.append(frame.symbols.ref(arg.name))
+
         undeclared = find_undeclared(node.body, ("caller", "kwargs", "varargs"))
 
         if "caller" in undeclared:
@@ -681,6 +686,21 @@ class CodeGenerator(NodeVisitor):
                 self.visit(default, frame)
             self.mark_parameter_stored(ref)
             self.outdent()
+        for idx, arg in enumerate(node.kwonlyargs):
+            ref = frame.symbols.ref(arg.name)
+            self.writeline(f"if {ref} is missing:")
+            self.indent()
+            default = node.kwonlydefaults[idx]
+            if default is None:
+                self.writeline(
+                    f'raise TypeError("macro {getattr(node, "name", None)!r} is'
+                    f' missing required keyword-only argument {arg.name!r}")'
+                )
+            else:
+                self.writeline(f"{ref} = ")
+                self.visit(default, frame)
+            self.mark_parameter_stored(ref)
+            self.outdent()
         self.pop_parameter_definitions()
 
         self.blockvisit(node.body, frame)
@@ -693,13 +713,17 @@ class CodeGenerator(NodeVisitor):
     def macro_def(self, macro_ref: MacroRef, frame: Frame) -> None:
         """Dump the macro definition for the def created by macro_body."""
         arg_tuple = ", ".join(repr(x.name) for x in macro_ref.node.args)
+        kwonly_tuple = ", ".join(repr(x.name) for x in macro_ref.node.kwonlyargs)
         name = getattr(macro_ref.node, "name", None)
         if len(macro_ref.node.args) == 1:
             arg_tuple += ","
+        if len(macro_ref.node.kwonlyargs) == 1:
+            kwonly_tuple += ","
         self.write(
             f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
             f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
-            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
+            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape,"
+            f" ({kwonly_tuple}))"
         )
 
     def position(self, node: nodes.Node) -> str:

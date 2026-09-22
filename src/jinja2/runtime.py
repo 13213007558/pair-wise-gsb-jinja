@@ -672,12 +672,14 @@ class Macro:
         catch_varargs: bool,
         caller: bool,
         default_autoescape: bool | None = None,
+        kwonlyarguments: tuple[str, ...] = (),
     ):
         self._environment = environment
         self._func = func
         self._argument_count = len(arguments)
         self.name = name
         self.arguments = arguments
+        self.kwonlyarguments = kwonlyarguments
         self.catch_kwargs = catch_kwargs
         self.catch_varargs = catch_varargs
         self.caller = caller
@@ -738,6 +740,14 @@ class Macro:
                 arguments.append(value)
         else:
             found_caller = self.explicit_caller
+
+        # Keyword-only arguments can only be consumed by name. They are
+        # appended after the positional arguments to match the parameter
+        # order of the generated macro function. Values that were not
+        # passed stay missing so the macro body can apply defaults or
+        # report required keyword-only arguments as not provided.
+        for name in self.kwonlyarguments:
+            arguments.append(kwargs.pop(name, missing))
 
         # it's important that the order of these arguments does not change
         # if not also changed in the compiler's `function_scoping` method.

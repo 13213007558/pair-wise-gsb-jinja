@@ -402,17 +402,37 @@ class Parser:
     def parse_signature(self, node: _MacroCall) -> None:
         args = node.args = []
         defaults = node.defaults = []
+        kwonlyargs = node.kwonlyargs = []
+        kwonlydefaults = node.kwonlydefaults = []
         self.stream.expect("lparen")
+        seen_star = False
         while self.stream.current.type != "rparen":
-            if args:
+            if args or kwonlyargs or seen_star:
                 self.stream.expect("comma")
+            if self.stream.current.type == "mul":
+                if seen_star:
+                    self.fail("duplicate '*' in macro signature")
+                seen_star = True
+                next(self.stream)
+                self.stream.skip_if("comma")
+                if self.stream.current.type == "mul":
+                    self.fail("duplicate '*' in macro signature")
+                if self.stream.current.type == "rparen":
+                    self.fail("expected at least one keyword-only argument after '*'")
             arg = self.parse_assign_target(name_only=True)
             arg.set_ctx("param")
-            if self.stream.skip_if("assign"):
-                defaults.append(self.parse_expression())
-            elif defaults:
-                self.fail("non-default argument follows default argument")
-            args.append(arg)
+            if seen_star:
+                if self.stream.skip_if("assign"):
+                    kwonlydefaults.append(self.parse_expression())
+                else:
+                    kwonlydefaults.append(None)
+                kwonlyargs.append(arg)
+            else:
+                if self.stream.skip_if("assign"):
+                    defaults.append(self.parse_expression())
+                elif defaults:
+                    self.fail("non-default argument follows default argument")
+                args.append(arg)
         self.stream.expect("rparen")
 
     def parse_call_block(self) -> nodes.CallBlock:
@@ -422,6 +442,8 @@ class Parser:
         else:
             node.args = []
             node.defaults = []
+            node.kwonlyargs = []
+            node.kwonlydefaults = []
 
         call_node = self.parse_expression()
         if not isinstance(call_node, nodes.Call):

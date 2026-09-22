@@ -907,6 +907,20 @@ The macro can then be called like a function in the namespace::
 If the macro was defined in a different template, you have to
 :ref:`import <import>` it first.
 
+Arguments declared after a ``*`` separator are keyword-only, like in
+Python.  They must be passed by name when the macro is called, may have
+defaults, and may be required.  Default expressions are evaluated in the
+template's context each time the macro is called::
+
+    {% macro badge(text, *, tone='info', compact) -%}
+        <span class="badge badge-{{ tone }}">{{ text }}</span>
+    {%- endmacro %}
+
+    {{ badge('New', tone='warn', compact=true) }}
+
+Calling the macro without a required keyword-only argument, or passing
+extra positional arguments, raises an error that points at the template.
+
 Inside macros, you have access to three special variables:
 
 `varargs`
@@ -929,6 +943,10 @@ are available on a macro object:
 
 `arguments`
     A tuple of the names of arguments the macro accepts.
+
+`kwonlyarguments`
+    A tuple of the names of keyword-only arguments (declared after ``*``)
+    the macro accepts.
 
 `catch_kwargs`
     This is `true` if the macro accepts extra keyword arguments (i.e.: accesses

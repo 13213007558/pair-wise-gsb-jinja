@@ -460,6 +460,132 @@ class TestMacros:
         assert tmpl.module.m(1, x=7) == "1|7|7"
 
 
+class TestMacroKeywordOnlyArgs:
+    def test_keyword_only(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, tone='info', compact) %}"
+            "[{{ text }}|{{ tone }}|{{ compact }}]{% endmacro %}"
+            "{{ badge('hi', compact=true) }}"
+            "{{ badge('hi', tone='warn', compact=false) }}"
+        )
+        assert tmpl.render() == "[hi|info|True][hi|warn|False]"
+
+    def test_keyword_only_metadata(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, tone='info', compact) %}{% endmacro %}"
+        )
+        macro = tmpl.module.badge
+        assert macro.arguments == ("text",)
+        assert macro.kwonlyarguments == ("tone", "compact")
+
+    def test_positional_metadata_unchanged(self, env):
+        tmpl = env.from_string("{% macro foo(a, b=1) %}{% endmacro %}")
+        assert tmpl.module.foo.arguments == ("a", "b")
+        assert tmpl.module.foo.kwonlyarguments == ()
+
+    def test_keyword_only_not_positional(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, tone='info') %}{% endmacro %}"
+            "{{ badge('hi', 'warn') }}"
+        )
+        with pytest.raises(TypeError, match="takes not more than 1 argument"):
+            tmpl.render()
+
+    def test_missing_required(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, compact) %}{% endmacro %}{{ badge('hi') }}"
+        )
+        with pytest.raises(TypeError, match="missing required keyword-only"):
+            tmpl.render()
+
+    def test_unknown_keyword(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, tone='info') %}{% endmacro %}"
+            "{{ badge('hi', size=3) }}"
+        )
+        with pytest.raises(TypeError, match="takes no keyword argument 'size'"):
+            tmpl.render()
+
+    def test_duplicate_value(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(text, *, tone='info') %}{% endmacro %}"
+            "{{ badge('hi', text='dup') }}"
+        )
+        with pytest.raises(TypeError, match="takes no keyword argument 'text'"):
+            tmpl.render()
+
+    def test_duplicate_star(self, env):
+        with pytest.raises(TemplateSyntaxError, match="duplicate"):
+            env.from_string("{% macro badge(*, tone, *, size) %}{% endmacro %}")
+
+    def test_star_without_args(self, env):
+        with pytest.raises(TemplateSyntaxError, match="keyword-only"):
+            env.from_string("{% macro badge(text, *) %}{% endmacro %}")
+
+    def test_default_after_required(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(*, compact, tone='info') %}"
+            "{{ compact }}|{{ tone }}{% endmacro %}"
+            "{{ badge(compact=true) }}"
+        )
+        assert tmpl.render() == "True|info"
+
+    def test_defaults_use_template_scope_at_call_time(self, env):
+        tmpl = env.from_string(
+            "{% set ns = namespace(tone='a') %}"
+            "{% macro badge(*, tone=ns.tone) %}{{ tone }}{% endmacro %}"
+            "{{ badge() }}{% set ns.tone = 'b' %}{{ badge() }}"
+        )
+        assert tmpl.render() == "ab"
+
+    def test_kwargs_varargs_caller_conventions(self, env):
+        tmpl = env.from_string(
+            "{% macro badge(*, tone='info') %}"
+            "{{ tone }}|{{ kwargs }}|{{ varargs }}{% endmacro %}"
+            "{{ badge(tone='warn', extra=1) }}"
+        )
+        assert tmpl.render() == "warn|{'extra': 1}|()"
+
+        tmpl = env.from_string(
+            "{% macro wrap(*, tag) %}<{{ tag }}>{{ caller() }}</{{ tag }}>"
+            "{% endmacro %}"
+            "{% call wrap(tag='b') %}x{% endcall %}"
+        )
+        assert tmpl.render() == "<b>x</b>"
+
+    def test_import(self, env):
+        env.loader = DictLoader(
+            {
+                "macros.html": (
+                    "{% macro badge(text, *, tone='info') %}"
+                    "[{{ text }}|{{ tone }}]{% endmacro %}"
+                )
+            }
+        )
+        tmpl = env.from_string(
+            "{% import 'macros.html' as m %}{{ m.badge('a', tone='warn') }}"
+        )
+        assert tmpl.render() == "[a|warn]"
+        tmpl = env.from_string("{% from 'macros.html' import badge %}{{ badge('b') }}")
+        assert tmpl.render() == "[b|info]"
+
+    def test_call_block_keyword_only_signature(self, env):
+        tmpl = env.from_string(
+            "{% macro dump() %}{{ caller('a', sep='|') }}{% endmacro %}"
+            "{% call(item, *, sep='-') dump() %}{{ item }}{{ sep }}{% endcall %}"
+        )
+        assert tmpl.render() == "a|"
+
+    def test_macro_passed_as_argument(self, env):
+        tmpl = env.from_string(
+            "{% macro inner(*, text, tone='info') %}{{ tone }}:{{ text }}"
+            "{% endmacro %}"
+            "{% macro outer(fn) %}{{ fn(text='hi') }}{% endmacro %}"
+            "{{ outer(inner) }}"
+        )
+        assert tmpl.render() == "info:hi"
+
+
 class TestSet:
     def test_normal(self, env_trim):
         tmpl = env_trim.from_string("{% set foo = 1 %}{{ foo }}")
