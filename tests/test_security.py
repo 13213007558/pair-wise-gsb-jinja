@@ -1,7 +1,9 @@
 import pytest
 from markupsafe import escape
 
+from jinja2 import DictLoader
 from jinja2 import Environment
+from jinja2 import Undefined
 from jinja2.exceptions import SecurityError
 from jinja2.exceptions import TemplateRuntimeError
 from jinja2.exceptions import TemplateSyntaxError
@@ -190,6 +192,267 @@ class TestStringFormatMap:
 
         with pytest.raises(SecurityError):
             t.render()
+
+
+class RecordingObject:
+    """Records descriptor executions in ``log`` so tests can assert the
+    order and count of attribute accesses."""
+
+    def __init__(self, log):
+        self.log = log
+
+    @property
+    def allowed(self):
+        self.log.append(("exec", "allowed"))
+        return "A"
+
+    @property
+    def _denied(self):
+        self.log.append(("exec", "_denied"))
+        return "D"
+
+    @property
+    def raises_attr_error(self):
+        raise AttributeError("raises_attr_error")
+
+    @property
+    def raises_value_error(self):
+        raise ValueError("raises_value_error")
+
+
+class CallableDescriptor:
+    def __init__(self):
+        self.get_count = 0
+
+    def __get__(self, obj, objtype=None):
+        self.get_count += 1
+        return self
+
+    def __call__(self):
+        return "called"
+
+
+class DescriptorHolder:
+    allowed_desc = CallableDescriptor()
+    _denied_desc = CallableDescriptor()
+
+
+class AttrAndItem:
+    """Has an attribute and a dict-style item with the same name."""
+
+    def __init__(self):
+        self.same = "attr-value"
+
+    def __getitem__(self, key):
+        if key in {"same", "only_item"}:
+            return f"item-{key}"
+        raise KeyError(key)
+
+
+class RecordingPolicyEnv(SandboxedEnvironment):
+    """Records the object and attribute name seen by the policy."""
+
+    def __init__(self, log, denied=(), **kwargs):
+        super().__init__(**kwargs)
+        self._log = log
+        self._denied = set(denied)
+
+    def is_safe_attribute(self, obj, attr, value):
+        self._log.append(("policy", attr))
+        if attr in self._denied:
+            return False
+        return super().is_safe_attribute(obj, attr, value)
+
+
+class TestUnifiedAttributePolicy:
+    def test_allowed_attribute_policy_before_execution(self):
+        log = []
+        env = RecordingPolicyEnv(log)
+        obj = RecordingObject(log)
+        assert env.from_string("{{ obj.allowed }}").render(obj=obj) == "A"
+        assert log == [("policy", "allowed"), ("exec", "allowed")]
+
+    def test_denied_attribute_not_executed(self):
+        log = []
+        env = RecordingPolicyEnv(log)
+        obj = RecordingObject(log)
+        assert env.from_string("{{ obj._denied }}").render(obj=obj) == ""
+        assert log == [("policy", "_denied")]
+
+    def test_denied_attribute_undefined_raises_security_error(self):
+        env = SandboxedEnvironment()
+        obj = RecordingObject([])
+        out = env.getattr(obj, "_denied")
+        assert isinstance(out, Undefined)
+        pytest.raises(
+            SecurityError, env.from_string("{{ obj._denied() }}").render, obj=obj
+        )
+
+    def test_no_cached_policy_decision_between_renders(self):
+        log = []
+        env = RecordingPolicyEnv(log)
+        obj = RecordingObject(log)
+        t = env.from_string("{{ obj.allowed }}")
+        assert t.render(obj=obj) == "A"
+        assert t.render(obj=obj) == "A"
+        execs = [entry for entry in log if entry[0] == "exec"]
+        assert execs == [("exec", "allowed"), ("exec", "allowed")]
+
+    def test_custom_denied_descriptor_not_executed(self):
+        log = []
+        env = RecordingPolicyEnv(log, denied={"allowed"})
+        obj = RecordingObject(log)
+        assert env.from_string("{{ obj.allowed }}").render(obj=obj) == ""
+        assert ("exec", "allowed") not in log
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "{{ obj|attr('_denied') }}",
+            "{{ obj._denied }}",
+            "{{ obj['_denied'] }}",
+            "{{ [obj]|map(attribute='_denied')|list }}",
+            "{{ [obj]|selectattr('_denied')|list }}",
+        ],
+    )
+    def test_all_paths_deny_private_attribute(self, template):
+        log = []
+        env = SandboxedEnvironment()
+        obj = RecordingObject(log)
+        out = env.from_string(template).render(obj=obj)
+        assert out in ("", "[Undefined]", "[]")
+        assert log == []
+
+    def test_attr_filter_allow_deny_undefined(self):
+        env = SandboxedEnvironment()
+        obj = RecordingObject([])
+        t = env.from_string(
+            "{{ obj|attr('allowed') is defined }}"
+            "{{ obj|attr('_denied') is defined }}"
+            "{{ obj|attr('missing') is defined }}"
+        )
+        assert t.render(obj=obj) == "TrueFalseFalse"
+
+    def test_attr_filter_missing_returns_undefined(self):
+        env = SandboxedEnvironment()
+        obj = RecordingObject([])
+        out = env.from_string("{{ obj|attr('missing') }}").render(obj=obj)
+        assert out == ""
+        assert isinstance(env.getattr(obj, "missing"), Undefined)
+
+    def test_chained_attr_filter_checked_each_step(self):
+        log = []
+        env = RecordingPolicyEnv(log)
+        obj = RecordingObject(log)
+        obj.sub = obj
+        t = env.from_string("{{ obj|attr('sub')|attr('allowed') }}")
+        assert t.render(obj=obj) == "A"
+        assert ("policy", "sub") in log
+        assert ("policy", "allowed") in log
+        t = env.from_string("{{ obj|attr('sub')|attr('_denied') }}")
+        assert t.render(obj=obj) == ""
+        assert ("exec", "_denied") not in log
+
+    def test_item_and_attribute_same_name(self):
+        for env in Environment(), SandboxedEnvironment():
+            obj = AttrAndItem()
+            assert env.from_string("{{ obj['same'] }}").render(obj=obj) == "item-same"
+            assert env.from_string("{{ obj.same }}").render(obj=obj) == "attr-value"
+            assert (
+                env.from_string("{{ obj|attr('same') }}").render(obj=obj)
+                == "attr-value"
+            )
+            assert (
+                env.from_string("{{ [obj]|map(attribute='same')|first }}").render(
+                    obj=obj
+                )
+                == "item-same"
+            )
+            assert (
+                env.from_string("{{ obj.only_item }}").render(obj=obj)
+                == "item-only_item"
+            )
+
+    def test_callable_descriptor(self):
+        env = SandboxedEnvironment()
+        holder = DescriptorHolder()
+        assert env.from_string("{{ holder.allowed_desc() }}").render(holder=holder) == (
+            "called"
+        )
+        assert DescriptorHolder.__dict__["allowed_desc"].get_count == 1
+        assert env.from_string("{{ holder._denied_desc }}").render(holder=holder) == ""
+        assert DescriptorHolder.__dict__["_denied_desc"].get_count == 0
+
+    def test_descriptor_exceptions(self):
+        env = SandboxedEnvironment()
+        obj = RecordingObject([])
+        pytest.raises(
+            ValueError,
+            env.from_string("{{ obj.raises_value_error }}").render,
+            obj=obj,
+        )
+        assert env.from_string("{{ obj.raises_attr_error }}").render(obj=obj) == ""
+
+    def test_macro_and_inheritance_do_not_bypass(self):
+        log = []
+        env = RecordingPolicyEnv(
+            log,
+            loader=DictLoader(
+                {
+                    "base": "{% block content %}{% endblock %}",
+                    "child": (
+                        "{% extends 'base' %}{% block content %}"
+                        "{% macro show(x) %}"
+                        "{{ x.allowed }}{{ x._denied }}"
+                        "{% endmacro %}"
+                        "{{ show(obj) }}"
+                        "{% endblock %}"
+                    ),
+                }
+            ),
+        )
+        obj = RecordingObject(log)
+        assert env.get_template("child").render(obj=obj) == "A"
+        assert ("exec", "allowed") in log
+        assert ("exec", "_denied") not in log
+
+    def test_async_filters_do_not_bypass(self, run_async_fn):
+        log = []
+        env = RecordingPolicyEnv(log, enable_async=True)
+        obj = RecordingObject(log)
+
+        async def test():
+            t = env.from_string(
+                "{{ [obj]|map(attribute='allowed')|list }}"
+                "{{ [obj]|map(attribute='_denied')|list }}"
+                "{{ [obj]|selectattr('_denied')|list }}"
+            )
+            return await t.render_async(obj=obj)
+
+        assert run_async_fn(test) == "['A'][Undefined][]"
+        assert ("exec", "allowed") in log
+        assert ("exec", "_denied") not in log
+
+    def test_policy_sees_stable_object_and_name(self):
+        log = []
+        env = RecordingPolicyEnv(log)
+        obj = RecordingObject(log)
+        env.from_string("{{ obj.allowed }}").render(obj=obj)
+        env.from_string("{{ obj|attr('allowed') }}").render(obj=obj)
+        env.from_string("{{ [obj]|map(attribute='allowed')|list }}").render(obj=obj)
+        policy_entries = [entry for entry in log if entry[0] == "policy"]
+        assert policy_entries == [("policy", "allowed")] * 3
+
+    def test_plain_environment_behavior_unchanged(self):
+        log = []
+        env = Environment()
+        obj = RecordingObject(log)
+        assert env.from_string("{{ obj.allowed }}").render(obj=obj) == "A"
+        assert env.from_string("{{ obj._denied }}").render(obj=obj) == "D"
+        assert ("exec", "allowed") in log
+        assert ("exec", "_denied") in log
+        assert env.from_string("{{ obj|attr('missing') }}").render(obj=obj) == ""
+        assert isinstance(env.getattr(obj, "missing"), Undefined)
 
     def test_attr_filter(self) -> None:
         env = SandboxedEnvironment()

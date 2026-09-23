@@ -51,6 +51,11 @@ prevent calling them from templates when passing objects as data. Use
 :class:`ImmutableSandboxedEnvironment` to prevent modifying lists and
 dictionaries.
 
+The sandbox checks :meth:`~SandboxedEnvironment.is_safe_attribute`
+before executing any descriptor, so a denied ``property`` is never
+executed and cannot cause side effects. The ``value`` passed to the
+policy is resolved statically, without executing descriptors.
+
 
 API
 ---

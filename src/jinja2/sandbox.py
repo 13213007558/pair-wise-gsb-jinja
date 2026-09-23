@@ -5,12 +5,13 @@ Useful when the template itself comes from an untrusted source.
 import operator
 import types
 import typing as t
-from _string import formatter_field_name_split  # type: ignore
 from collections import abc
 from collections import deque
 from functools import update_wrapper
+from inspect import getattr_static
 from string import Formatter
 
+from _string import formatter_field_name_split  # type: ignore
 from markupsafe import EscapeFormatter
 from markupsafe import Markup
 
@@ -289,45 +290,74 @@ class SandboxedEnvironment(Environment):
         """Subscribe an object from sandboxed code."""
         try:
             return obj[argument]
-        except (TypeError, LookupError):
+        except (AttributeError, TypeError, LookupError):
             if isinstance(argument, str):
                 try:
                     attr = str(argument)
                 except Exception:
                     pass
                 else:
-                    try:
-                        value = getattr(obj, attr)
-                    except AttributeError:
-                        pass
-                    else:
-                        fmt = self.wrap_str_format(value)
-                        if fmt is not None:
-                            return fmt
-                        if self.is_safe_attribute(obj, argument, value):
-                            return value
-                        return self.unsafe_undefined(obj, argument)
+                    found, value = self._getattr_checked(obj, attr)
+
+                    if found:
+                        return value
+
         return self.undefined(obj=obj, name=argument)
 
     def getattr(self, obj: t.Any, attribute: str) -> t.Any | Undefined:
         """Subscribe an object from sandboxed code and prefer the
         attribute.  The attribute passed *must* be a bytestring.
         """
+        found, value = self._getattr_checked(obj, attribute)
+
+        if found:
+            return value
+
         try:
-            value = getattr(obj, attribute)
+            return obj[attribute]
+        except (AttributeError, TypeError, LookupError):
+            return self.undefined(obj=obj, name=attribute)
+
+    def _getattr_checked(self, obj: t.Any, attribute: str) -> tuple[bool, t.Any]:
+        """Look up an attribute while applying the sandbox policy.
+
+        Returns a ``(found, value)`` tuple. ``found`` is ``False`` if the
+        attribute does not exist, otherwise ``value`` is the attribute
+        value, or an unsafe undefined if the policy denied access.
+
+        The policy is checked before any descriptor is executed, so a
+        denied attribute cannot cause side effects. The value seen by
+        :meth:`is_safe_attribute` is resolved statically, without
+        executing descriptors.
+        """
+        try:
+            static_value = getattr_static(obj, attribute)
         except AttributeError:
+            # Not found statically, it might be provided dynamically by
+            # __getattr__ or __getattribute__, or not exist at all.
             try:
-                return obj[attribute]
-            except (TypeError, LookupError):
-                pass
+                value = getattr(obj, attribute)
+            except AttributeError:
+                return False, None
+
+            if not self.is_safe_attribute(obj, attribute, value):
+                return True, self.unsafe_undefined(obj, attribute)
         else:
-            fmt = self.wrap_str_format(value)
-            if fmt is not None:
-                return fmt
-            if self.is_safe_attribute(obj, attribute, value):
-                return value
-            return self.unsafe_undefined(obj, attribute)
-        return self.undefined(obj=obj, name=attribute)
+            if not self.is_safe_attribute(obj, attribute, static_value):
+                return True, self.unsafe_undefined(obj, attribute)
+
+            try:
+                value = getattr(obj, attribute)
+            except AttributeError:
+                # A descriptor raised AttributeError when executed.
+                return False, None
+
+        fmt = self.wrap_str_format(value)
+
+        if fmt is not None:
+            return True, fmt
+
+        return True, value
 
     def unsafe_undefined(self, obj: t.Any, attribute: str) -> Undefined:
         """Return an undefined object for unsafe attributes."""

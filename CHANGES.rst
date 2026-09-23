@@ -14,6 +14,13 @@ Unreleased
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
 
+-   The sandbox applies its attribute policy before executing
+    descriptors, so a denied ``property`` or other descriptor is never
+    executed. ``SandboxedEnvironment.getattr`` and ``getitem`` resolve
+    attributes statically first, and all template, filter, and test
+    attribute access goes through the same check. The value passed to
+    ``is_safe_attribute`` is resolved without executing descriptors.
+
 
 Version 3.1.6
 -------------
