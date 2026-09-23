@@ -841,6 +841,7 @@ class Environment:
         .. versionadded:: 2.4
         """
         from .loaders import ModuleLoader
+        from .bccache import get_environment_key
 
         if log_function is None:
 
@@ -849,6 +850,10 @@ class Environment:
 
         assert log_function is not None
         assert self.loader is not None, "No loader configured."
+        # Embed the key of the environment options that affect
+        # compilation, so that ModuleLoader applies the same
+        # invalidation rules as the bytecode cache.
+        environment_key = get_environment_key(self)
 
         def write_file(filename: str, data: str) -> None:
             if zip:
@@ -887,7 +892,10 @@ class Environment:
 
                 filename = ModuleLoader.get_module_filename(name)
 
-                write_file(filename, code)
+                write_file(
+                    filename,
+                    f"__jinja2_environment_key__ = {environment_key!r}\n{code}",
+                )
                 log_function(f'Compiled "{name}" as {filename}')
         finally:
             if zip:

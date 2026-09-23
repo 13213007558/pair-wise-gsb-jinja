@@ -16,6 +16,7 @@ from types import ModuleType
 
 from .exceptions import TemplateNotFound
 from .utils import internalcode
+from .bccache import get_environment_key
 
 if t.TYPE_CHECKING:
     from .environment import Environment
@@ -676,6 +677,17 @@ class ModuleLoader(BaseLoader):
             # remove the entry from sys.modules, we only want the attribute
             # on the module object we have stored on the loader.
             sys.modules.pop(module, None)
+
+        # Modules compiled with different environment options (extensions,
+        # autoescape, ...) are stale.  Apply the same invalidation rules as
+        # the bytecode cache and treat them as a cache miss.  Modules
+        # compiled before this marker existed are accepted as-is.
+        module_env_key = getattr(mod, "__jinja2_environment_key__", None)
+
+        if module_env_key is not None and module_env_key != get_environment_key(
+            environment
+        ):
+            raise TemplateNotFound(name)
 
         if globals is None:
             globals = {}

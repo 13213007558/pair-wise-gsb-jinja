@@ -10,7 +10,6 @@ import errno
 import fnmatch
 import marshal
 import os
-import pickle
 import stat
 import sys
 import tempfile
@@ -30,15 +29,99 @@ if t.TYPE_CHECKING:
         def set(self, key: str, value: bytes, timeout: int | None = None) -> None: ...
 
 
-bc_version = 5
-# Magic bytes to identify Jinja bytecode cache files. Contains the
-# Python major and minor version to avoid loading incompatible bytecode
-# if a project upgrades its Python version.
+bc_version = 6
+# Magic bytes to identify Jinja bytecode cache files. Contains the cache
+# format version and the Python major and minor version to avoid loading
+# incompatible bytecode if a project upgrades Jinja or its Python version.
 bc_magic = (
-    b"j2"
-    + pickle.dumps(bc_version, 2)
-    + pickle.dumps((sys.version_info[0] << 24) | sys.version_info[1], 2)
+    b"j2|"
+    + str(bc_version).encode("ascii")
+    + b"|"
+    + str((sys.version_info[0] << 24) | sys.version_info[1]).encode("ascii")
+    + b"|"
 )
+
+#: Maximum accepted byte length of the checksum stored in a cache file.
+#: Files claiming a longer checksum are considered corrupt and ignored.
+_MAX_CHECKSUM_LENGTH = 4096
+
+
+def _read_exact(f: t.BinaryIO, size: int) -> bytes:
+    """Read exactly ``size`` bytes or raise ``ValueError`` if the file
+    is truncated or corrupt.
+    """
+    data = f.read(size)
+
+    if len(data) != size:
+        raise ValueError("truncated cache file")
+
+    return data
+
+
+def _safe_value_key(value: t.Any) -> str:
+    """Return a stable identifier for a compilation-relevant value.
+
+    ``repr`` of arbitrary objects is never used so that memory addresses,
+    absolute temporary paths, or secrets held by an object cannot leak
+    into a cache key that is shared between environments or processes.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return repr(value)
+
+    module = getattr(value, "__module__", None)
+    qualname = getattr(value, "__qualname__", None)
+
+    if module and qualname:
+        return f"{module}.{qualname}"
+
+    return type(value).__qualname__
+
+
+def get_environment_key(environment: "Environment") -> str:
+    """Return a checksum for the environment options that affect code
+    generation.  Two environments that would compile the same source to
+    different bytecode produce different keys, so a cache shared between
+    environments never returns bytecode compiled with different settings.
+
+    This covers the code generation format version, the extensions (with
+    their optional ``version`` attribute), and options such as
+    ``undefined``, ``autoescape`` and ``optimized``.  Secrets and
+    absolute paths are never included, so the key is safe to share.
+
+    .. versionadded:: 3.2
+    """
+    parts = [
+        f"format={bc_version}",
+        f"optimized={environment.optimized!r}",
+        f"async={environment.is_async!r}",
+        f"undefined={_safe_value_key(environment.undefined)}",
+        f"autoescape={_safe_value_key(environment.autoescape)}",
+        f"finalize={_safe_value_key(environment.finalize)}",
+        f"trim_blocks={environment.trim_blocks!r}",
+        f"lstrip_blocks={environment.lstrip_blocks!r}",
+        f"newline_sequence={environment.newline_sequence!r}",
+        f"keep_trailing_newline={environment.keep_trailing_newline!r}",
+        f"sandboxed={environment.sandboxed!r}",
+    ]
+
+    if environment.sandboxed:
+        parts.append(f"intercepted_binops={sorted(environment.intercepted_binops)!r}")
+        parts.append(f"intercepted_unops={sorted(environment.intercepted_unops)!r}")
+
+    for identifier in sorted(environment.extensions):
+        parts.append(f"extension={identifier}")
+        version = getattr(environment.extensions[identifier], "version", None)
+
+        if version is not None:
+            parts.append(f"extension_version={_safe_value_key(version)}")
+
+    hash = sha1()
+
+    for part in parts:
+        hash.update(part.encode("utf-8"))
+        hash.update(b"\x00")
+
+    return hash.hexdigest()
 
 
 class Bucket:
@@ -68,7 +151,20 @@ class Bucket:
             self.reset()
             return
         # the source code of the file changed, we need to reload
-        checksum = pickle.load(f)
+        # The checksum is stored as a length-prefixed string.  The cache
+        # format deliberately avoids pickle so that loading a cache file
+        # can never execute arbitrary code, even if the file is hostile.
+        try:
+            length = int.from_bytes(_read_exact(f, 4), "big")
+
+            if length > _MAX_CHECKSUM_LENGTH:
+                raise ValueError("checksum length too large")
+
+            checksum = _read_exact(f, length).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            self.reset()
+            return
+        # the source code of the file changed, we need to reload
         if self.checksum != checksum:
             self.reset()
             return
@@ -83,8 +179,10 @@ class Bucket:
         """Dump the bytecode into the file or file like object passed."""
         if self.code is None:
             raise TypeError("can't write empty bucket")
+        checksum = self.checksum.encode("utf-8")
         f.write(bc_magic)
-        pickle.dump(self.checksum, f, 2)
+        f.write(len(checksum).to_bytes(4, "big"))
+        f.write(checksum)
         marshal.dump(self.code, f)
 
     def bytecode_from_string(self, string: bytes) -> None:
@@ -160,6 +258,20 @@ class BytecodeCache:
         """Returns a checksum for the source."""
         return sha1(source.encode("utf-8")).hexdigest()
 
+    def get_environment_key(self, environment: "Environment") -> str:
+        """Returns a key that identifies the environment options that
+        affect compilation.  Environments with different extensions or
+        options such as ``undefined``, ``autoescape`` or ``optimized``
+        produce different keys, so a cache shared between environments
+        never returns bytecode compiled with different settings.  The
+        key does not contain secrets or absolute paths and is safe to
+        share.  Return an empty string to opt out of environment
+        specific cache keys.
+
+        .. versionadded:: 3.2
+        """
+        return get_environment_key(environment)
+
     def get_bucket(
         self,
         environment: "Environment",
@@ -171,7 +283,19 @@ class BytecodeCache:
         mandatory but filename may be `None`.
         """
         key = self.get_cache_key(name, filename)
+        environment_key = self.get_environment_key(environment)
+
+        if environment_key:
+            key = f"{key}_{environment_key}"
+
         checksum = self.get_source_checksum(source)
+
+        if environment_key:
+            # Bind the checksum to the environment as well, so that even
+            # a cache backend returning another environment's data is
+            # treated as a miss instead of executing foreign bytecode.
+            checksum = sha1(f"{checksum}|{environment_key}".encode("utf-8")).hexdigest()
+
         bucket = Bucket(environment, key, checksum)
         self.load_bytecode(bucket)
         return bucket
