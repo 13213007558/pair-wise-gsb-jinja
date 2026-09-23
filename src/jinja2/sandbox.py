@@ -9,6 +9,7 @@ from _string import formatter_field_name_split  # type: ignore
 from collections import abc
 from collections import deque
 from functools import update_wrapper
+from inspect import getattr_static
 from string import Formatter
 
 from markupsafe import EscapeFormatter
@@ -251,6 +252,12 @@ class SandboxedEnvironment(Environment):
         starting with an underscore are considered private as well as the
         special attributes of internal python objects as returned by the
         :func:`is_internal_attribute` function.
+
+        .. versionchanged:: 3.2
+            The policy is checked before a descriptor is executed, so that
+            a rejected attribute can't cause side effects. The ``value``
+            passed to this method may be the unexecuted descriptor in that
+            case.
         """
         return not (attr.startswith("_") or is_internal_attribute(obj, attr))
 
@@ -296,38 +303,71 @@ class SandboxedEnvironment(Environment):
                 except Exception:
                     pass
                 else:
-                    try:
-                        value = getattr(obj, attr)
-                    except AttributeError:
-                        pass
-                    else:
-                        fmt = self.wrap_str_format(value)
-                        if fmt is not None:
-                            return fmt
-                        if self.is_safe_attribute(obj, argument, value):
-                            return value
-                        return self.unsafe_undefined(obj, argument)
+                    found, value = self._get_safe_attribute(obj, attr)
+
+                    if found:
+                        return value
         return self.undefined(obj=obj, name=argument)
 
     def getattr(self, obj: t.Any, attribute: str) -> t.Any | Undefined:
         """Subscribe an object from sandboxed code and prefer the
         attribute.  The attribute passed *must* be a bytestring.
         """
+        found, value = self._get_safe_attribute(obj, attribute)
+
+        if found:
+            return value
+
         try:
-            value = getattr(obj, attribute)
-        except AttributeError:
-            try:
-                return obj[attribute]
-            except (TypeError, LookupError):
-                pass
-        else:
-            fmt = self.wrap_str_format(value)
-            if fmt is not None:
-                return fmt
-            if self.is_safe_attribute(obj, attribute, value):
-                return value
-            return self.unsafe_undefined(obj, attribute)
+            return obj[attribute]
+        except (TypeError, LookupError):
+            pass
         return self.undefined(obj=obj, name=attribute)
+
+    def _get_safe_attribute(self, obj: t.Any, attribute: str) -> tuple[bool, t.Any]:
+        """Look up an attribute on an object, applying the sandbox's
+        safety policy. Returns (True, value) if the attribute exists,
+        where the value may be an Undefined if the policy rejected it,
+        or (False, None) if the attribute doesn't exist.
+
+        The attribute is first inspected without executing any
+        descriptor, so that the policy can reject an attribute before
+        the descriptor has a chance to cause side effects. An
+        AttributeError raised by a descriptor while resolving an
+        allowed attribute is treated the same as a missing attribute.
+        """
+        try:
+            value = getattr_static(obj, attribute)
+        except AttributeError:
+            # The attribute can't be found without running code, but it
+            # might still be provided dynamically by __getattr__ or
+            # __getattribute__.
+            try:
+                value = getattr(obj, attribute)
+            except AttributeError:
+                return False, None
+        else:
+            # The attribute exists. Check the policy before resolving
+            # it, so that a rejected descriptor is never executed.
+            if not self.is_safe_attribute(obj, attribute, value):
+                return True, self.unsafe_undefined(obj, attribute)
+
+            try:
+                value = getattr(obj, attribute)
+            except AttributeError:
+                # The descriptor itself raised AttributeError, treat it
+                # like a missing attribute.
+                return False, None
+
+        fmt = self.wrap_str_format(value)
+
+        if fmt is not None:
+            return True, fmt
+
+        if not self.is_safe_attribute(obj, attribute, value):
+            return True, self.unsafe_undefined(obj, attribute)
+
+        return True, value
 
     def unsafe_undefined(self, obj: t.Any, attribute: str) -> Undefined:
         """Return an undefined object for unsafe attributes."""

@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   The sandbox checks its attribute policy before executing descriptors,
+    so accessing a rejected attribute can't cause side effects, and a
+    descriptor that raises ``AttributeError`` is not mistaken for a
+    missing attribute. The same check applies to attribute and item access
+    in template expressions, the ``attr`` filter, and filters that take
+    attribute names such as ``map`` and ``selectattr``.
 
 
 Version 3.1.6
