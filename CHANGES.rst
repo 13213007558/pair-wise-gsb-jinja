@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add `{% streaming macro %}`, which produces output incrementally
+    when called at a direct output position during ``generate`` and
+    ``generate_async``. Its result can be buffered explicitly with
+    the new ``collect`` filter; implicit string conversion in
+    expression positions raises ``TemplateRuntimeError``.
 
 
 Version 3.1.6

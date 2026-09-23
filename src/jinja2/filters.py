@@ -19,6 +19,7 @@ from .async_utils import auto_aiter
 from .async_utils import auto_await
 from .async_utils import auto_to_list
 from .exceptions import FilterArgumentError
+from .runtime import MacroStream
 from .runtime import Undefined
 from .utils import htmlsafe_json_dumps
 from .utils import pass_context
@@ -142,6 +143,21 @@ def do_forceescape(value: "str | HasHTML") -> Markup:
         value = t.cast("HasHTML", value).__html__()
 
     return escape(str(value))
+
+
+def do_collect(value: t.Any) -> t.Any:
+    """Explicitly collect the result of a streaming macro into a single
+    string, buffering all of its chunks.  Any other value is returned
+    unchanged.
+
+    .. sourcecode:: jinja
+
+        {% set table = render_rows(rows)|collect %}
+    """
+    if isinstance(value, MacroStream):
+        return value.collect()
+
+    return value
 
 
 def do_urlencode(
@@ -1815,6 +1831,7 @@ FILTERS = {
     "batch": do_batch,
     "capitalize": do_capitalize,
     "center": do_center,
+    "collect": do_collect,
     "count": len,
     "d": do_default,
     "default": do_default,

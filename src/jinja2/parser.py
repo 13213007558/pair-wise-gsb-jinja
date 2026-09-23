@@ -31,6 +31,7 @@ _statement_keywords = frozenset(
         "set",
         "with",
         "autoescape",
+        "streaming",
     ]
 )
 _compare_operators = frozenset(["eq", "ne", "lt", "lteq", "gt", "gteq"])
@@ -438,6 +439,20 @@ class Parser:
 
     def parse_macro(self) -> nodes.Macro:
         node = nodes.Macro(lineno=next(self.stream).lineno)
+        node.name = self.parse_assign_target(name_only=True).name
+        self.parse_signature(node)
+        node.body = self.parse_statements(("name:endmacro",), drop_needle=True)
+        return node
+
+    def parse_streaming(self) -> nodes.Macro:
+        lineno = next(self.stream).lineno
+
+        if self.stream.current.value != "macro":
+            self.fail("expected 'macro' after 'streaming'", self.stream.current.lineno)
+
+        next(self.stream)
+        node = nodes.Macro(lineno=lineno)
+        node.streaming = True
         node.name = self.parse_assign_target(name_only=True).name
         self.parse_signature(node)
         node.body = self.parse_statements(("name:endmacro",), drop_needle=True)

@@ -355,6 +355,10 @@ class Macro(Stmt):
     args: list["Name"]
     defaults: list["Expr"]
     body: list[Node]
+    #: If the macro was declared with `{% streaming macro %}` and
+    #: produces its output incrementally instead of returning a
+    #: buffered string.
+    streaming = False
 
 
 class CallBlock(Stmt):

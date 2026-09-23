@@ -1011,6 +1011,51 @@ Here's an example of how a call block can be used with arguments::
     {% endcall %}
 
 
+.. _streaming-macros:
+
+Streaming Macros
+~~~~~~~~~~~~~~~~
+
+A regular macro buffers its entire body and returns one string.  When a
+macro renders a large amount of data, for example a big table, the
+caller has to wait until every row was rendered before it sees the
+first piece of output.  A macro declared with `{% streaming macro %}`
+instead produces its output chunk by chunk when it is called at a
+direct output position::
+
+    {% streaming macro rows(data) %}
+        {% for row in data %}<tr><td>{{ row }}</td></tr>{% endfor %}
+    {% endmacro %}
+
+    <table>{{ rows(data) }}</table>
+
+When the template is rendered with :meth:`Template.generate` (or
+:meth:`Template.generate_async` in async mode), each chunk of the
+macro body is yielded as soon as it is produced.  If `data` is a
+slow iterator, the first row can be sent to the client while the
+remaining rows are still being loaded.  Only the direct output chain
+of a declared streaming macro is incremental, everything else keeps
+the regular buffering behavior.
+
+Streaming macros accept arguments, defaults, `varargs`, `kwargs`,
+and `caller` exactly like regular macros, and autoescape applies to
+their output in the same way.  They can call other streaming macros,
+and they can be imported from other templates.
+
+Calling a streaming macro does not return a string, so it can only be
+used where output is produced directly.  Positions that need a
+complete string, such as assignment, concatenation, or filters,
+require explicit buffering with the `collect` filter::
+
+    {% set table = rows(data)|collect %}
+    {{ rows(data)|collect|length }}
+
+Using the result in such a position without `collect` raises a
+`TemplateRuntimeError` rather than silently buffering everything::
+
+    {% set table = rows(data) %}  {# raises TemplateRuntimeError #}
+
+
 Filters
 ~~~~~~~
 

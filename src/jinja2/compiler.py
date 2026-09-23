@@ -661,7 +661,16 @@ class CodeGenerator(NodeVisitor):
         self.writeline(f"{self.func('macro')}({', '.join(args)}):", node)
         self.indent()
 
-        self.buffer(frame)
+        streaming = isinstance(node, nodes.Macro) and node.streaming
+
+        if streaming:
+            # A streaming macro yields its output chunk by chunk instead
+            # of buffering it.  Enforce a generator through a dead
+            # branch, like write_commons does.
+            self.writeline("if 0: yield None")
+        else:
+            self.buffer(frame)
+
         self.enter_frame(frame)
 
         self.push_parameter_definitions(frame)
@@ -684,7 +693,10 @@ class CodeGenerator(NodeVisitor):
         self.pop_parameter_definitions()
 
         self.blockvisit(node.body, frame)
-        self.return_buffer_contents(frame, force_unescaped=True)
+
+        if not streaming:
+            self.return_buffer_contents(frame, force_unescaped=True)
+
         self.leave_frame(frame, with_python_scope=True)
         self.outdent()
 
@@ -694,10 +706,12 @@ class CodeGenerator(NodeVisitor):
         """Dump the macro definition for the def created by macro_body."""
         arg_tuple = ", ".join(repr(x.name) for x in macro_ref.node.args)
         name = getattr(macro_ref.node, "name", None)
+        streaming = getattr(macro_ref.node, "streaming", False)
         if len(macro_ref.node.args) == 1:
             arg_tuple += ","
         self.write(
-            f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
+            f"{'StreamingMacro' if streaming else 'Macro'}(environment,"
+            f" macro, {name!r}, ({arg_tuple}),"
             f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
             f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
         )
@@ -1346,9 +1360,37 @@ class CodeGenerator(NodeVisitor):
         call_frame, macro_ref = self.macro_body(node, frame)
         self.writeline("caller = ")
         self.macro_def(macro_ref, call_frame)
-        self.start_write(frame, node)
+        value = self.temporary_identifier()
+        self.writeline(f"{value} = ", node.call)
         self.visit_Call(node.call, frame, forward_caller=True)
+        self.newline(node)
+        self.writeline(f"if isinstance({value}, MacroStream):")
+        self.indent()
+
+        if frame.buffer is None:
+            chunk = self.temporary_identifier()
+            self.writeline(
+                f"{self.choose_async('async ')}for {chunk} in {value}.iter_chunks():"
+            )
+            self.indent()
+            self.writeline(f"yield {chunk}")
+            self.outdent()
+        else:
+            self.writeline(
+                "raise TemplateRuntimeError"
+                '("the result of a streaming macro cannot be buffered'
+                " implicitly, use the 'collect' filter to buffer it"
+                ' explicitly")'
+            )
+
+        self.outdent()
+        self.writeline("else:")
+        self.indent()
+        self.start_write(frame, node)
+        self.write(value)
         self.end_write(frame)
+        self.newline(node)
+        self.outdent()
 
     def visit_FilterBlock(self, node: nodes.FilterBlock, frame: Frame) -> None:
         filter_frame = frame.inner()
@@ -1494,6 +1536,50 @@ class CodeGenerator(NodeVisitor):
         if finalize.src is not None:
             self.write(")")
 
+    def _output_streaming_call(
+        self, node: nodes.Call, frame: Frame, finalize: _FinalizeInfo
+    ) -> None:
+        """Output a call expression at a direct output position.  If the
+        call returns a streaming macro result, its chunks are streamed
+        one by one.  Any other value is finalized and converted like a
+        regular output child.
+        """
+        value = self.temporary_identifier()
+        chunk = self.temporary_identifier()
+
+        self.writeline(f"{value} = ", node)
+
+        if finalize.src is not None:
+            self.write(finalize.src)
+
+        self.visit(node, frame)
+
+        if finalize.src is not None:
+            self.write(")")
+
+        self.newline(node)
+        self.writeline(f"if isinstance({value}, MacroStream):")
+        self.indent()
+        self.writeline(
+            f"{self.choose_async('async ')}for {chunk} in {value}.iter_chunks():"
+        )
+        self.indent()
+        self.writeline(f"yield {chunk}")
+        self.outdent()
+        self.outdent()
+        self.writeline("else:")
+        self.indent()
+
+        if frame.eval_ctx.volatile:
+            wrapper = "(escape if context.eval_ctx.autoescape else str)"
+        elif frame.eval_ctx.autoescape:
+            wrapper = "escape"
+        else:
+            wrapper = "str"
+
+        self.writeline(f"yield {wrapper}({value})")
+        self.outdent()
+
     def visit_Output(self, node: nodes.Output, frame: Frame) -> None:
         # If an extends is active, don't render outside a block.
         if frame.require_output_check:
@@ -1553,6 +1639,13 @@ class CodeGenerator(NodeVisitor):
                 else:
                     self.writeline(val + ",")
             else:
+                if frame.buffer is None and isinstance(item, nodes.Call):
+                    # A call at a direct output position.  If it
+                    # evaluates to a streaming macro result, stream the
+                    # chunks instead of buffering them.
+                    self._output_streaming_call(item, frame, finalize)
+                    continue
+
                 if frame.buffer is None:
                     self.writeline("yield ", item)
                 else:
@@ -1599,9 +1692,32 @@ class CodeGenerator(NodeVisitor):
             self.outdent()
 
         self.newline(node)
-        self.visit(node.target, frame)
-        self.write(" = ")
-        self.visit(node.node, frame)
+
+        if isinstance(node.node, nodes.Call):
+            # A call may evaluate to a streaming macro result, which
+            # cannot be stored without being collected explicitly.
+            # Reject that here so the error points at the assignment.
+            value = self.temporary_identifier()
+            self.write(f"{value} = ")
+            self.visit(node.node, frame)
+            self.newline(node)
+            self.writeline(f"if isinstance({value}, MacroStream):")
+            self.indent()
+            self.writeline(
+                "raise TemplateRuntimeError"
+                '("the result of a streaming macro cannot be assigned'
+                " without being collected, use the 'collect' filter to"
+                ' buffer it explicitly")'
+            )
+            self.outdent()
+            self.newline(node)
+            self.visit(node.target, frame)
+            self.write(f" = {value}")
+        else:
+            self.visit(node.target, frame)
+            self.write(" = ")
+            self.visit(node.node, frame)
+
         self.pop_assign_tracking(frame)
 
     def visit_AssignBlock(self, node: nodes.AssignBlock, frame: Frame) -> None:

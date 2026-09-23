@@ -48,6 +48,8 @@ exported = [
     "LoopContext",
     "TemplateReference",
     "Macro",
+    "MacroStream",
+    "StreamingMacro",
     "Markup",
     "TemplateRuntimeError",
     "missing",
@@ -791,6 +793,105 @@ class Macro:
     def __repr__(self) -> str:
         name = "anonymous" if self.name is None else repr(self.name)
         return f"<{type(self).__name__} {name}>"
+
+
+class MacroStream:
+    """The result of calling a macro that was declared with
+    `{% streaming macro %}`.
+
+    Instead of a buffered string, the call produces its output chunk by
+    chunk.  Templates consume the chunks automatically when the call
+    appears at a direct output position.  Everywhere else the result
+    must be collected explicitly, for example with the `collect`
+    filter.  Implicit conversion to a string or iteration raises a
+    `TemplateRuntimeError` so that the streaming path cannot silently
+    turn into full buffering.
+
+    A stream is single-use, it can only be consumed once.
+    """
+
+    def __init__(
+        self,
+        name: str | None,
+        chunks: t.Iterator[str] | t.AsyncIterator[str],
+        autoescape: bool,
+        is_async: bool,
+    ):
+        self._name = name
+        self._chunks = chunks
+        self._autoescape = autoescape
+        self._is_async = is_async
+
+    def iter_chunks(self) -> t.Iterator[str] | t.AsyncIterator[str]:
+        """Return the underlying iterator of output chunks.  In async
+        templates this is an async iterator.
+        """
+        return self._chunks
+
+    def collect(self) -> str | t.Coroutine[t.Any, t.Any, str]:
+        """Buffer all remaining chunks and return them as a single
+        string.  In async templates this returns a coroutine.
+        """
+        if self._is_async:
+            return self._collect_async()
+
+        return self._finish(concat(t.cast(t.Iterator[str], self._chunks)))
+
+    async def _collect_async(self) -> str:
+        return self._finish(
+            concat(
+                [chunk async for chunk in t.cast(t.AsyncIterator[str], self._chunks)]
+            )
+        )
+
+    def _finish(self, rv: str) -> str:
+        if self._autoescape:
+            return Markup(rv)
+
+        return rv
+
+    def _reject(self) -> t.NoReturn:
+        raise TemplateRuntimeError(
+            f"the result of streaming macro {self._name!r} cannot be converted"
+            " to a string or iterated implicitly. Output the call directly so"
+            " it can stream, or collect it explicitly with the 'collect'"
+            " filter."
+        )
+
+    def __str__(self) -> str:
+        self._reject()
+
+    def __html__(self) -> str:
+        self._reject()
+
+    def __iter__(self) -> t.Iterator[str]:
+        self._reject()
+
+    def __aiter__(self) -> t.AsyncIterator[str]:
+        self._reject()
+
+    def __bool__(self) -> bool:
+        self._reject()
+
+    def __repr__(self) -> str:
+        name = "anonymous" if self._name is None else repr(self._name)
+        return f"<{type(self).__name__} {name}>"
+
+
+class StreamingMacro(Macro):
+    """Wraps a macro function that was declared with
+    `{% streaming macro %}`.  Argument binding works exactly like
+    `Macro`, but calling it returns a `MacroStream` instead of a
+    string.
+    """
+
+    def _invoke(self, arguments: list[t.Any], autoescape: bool) -> MacroStream:  # type: ignore[override]
+        return MacroStream(
+            self.name,
+            self._func(*arguments),  # type: ignore
+            autoescape,
+            self._environment.is_async,
+        )
 
 
 class Undefined:
