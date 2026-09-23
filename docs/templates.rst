@@ -1010,6 +1010,48 @@ Here's an example of how a call block can be used with arguments::
         </dl>
     {% endcall %}
 
+.. _streaming-macros:
+
+Streaming Macros
+~~~~~~~~~~~~~~~~
+
+A regular macro buffers its entire body and returns one string.  When a
+macro renders a large amount of data, such as a big table, the caller of
+:meth:`Template.generate` (or :meth:`Template.generate_async`) still has
+to wait until the macro has produced every row before anything is
+yielded.  A macro declared with the ``streaming`` keyword instead
+produces its output piece by piece when it is called in a position that
+outputs directly::
+
+    {% macro rows(items) streaming -%}
+        {% for item in items %}<tr>{{ item }}</tr>{% endfor %}
+    {%- endmacro %}
+
+    <table>{{ rows(data) }}</table>
+
+Iterating :meth:`Template.generate` now yields each ``<tr>`` chunk as
+soon as the ``data`` iterator provides the row, without buffering the
+whole table first.  This works in both sync and async environments,
+macros can call other streaming macros, and streaming macros can be
+imported from other templates.  Argument binding and autoescaping behave
+exactly like for regular macros, and rendering the template with
+:meth:`Template.render` produces the same output as before.
+
+Only the direct output chain is streamed.  Wherever a complete string is
+required, the result of a streaming macro must be collected explicitly
+with the ``collect`` filter::
+
+    {% set all_rows = rows(data)|collect %}
+    {{ rows(data)|collect|length }}
+
+Using a streaming macro result in such a position without ``collect``
+raises a :exc:`TemplateRuntimeError` instead of silently buffering it.
+This includes concatenation, filters such as ``join``, ``{% set %}``
+blocks, and the bodies of regular macros.  Regular macros are unchanged
+and keep returning a string.
+
+.. versionadded:: 3.2
+
 
 Filters
 ~~~~~~~

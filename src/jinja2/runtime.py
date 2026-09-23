@@ -4,6 +4,7 @@ import functools
 import sys
 import typing as t
 from collections import abc
+from contextlib import aclosing  # noqa: F401
 from itertools import chain
 
 from markupsafe import escape  # noqa: F401
@@ -48,6 +49,8 @@ exported = [
     "LoopContext",
     "TemplateReference",
     "Macro",
+    "MacroStream",
+    "AsyncMacroStream",
     "Markup",
     "TemplateRuntimeError",
     "missing",
@@ -62,6 +65,7 @@ exported = [
 ]
 async_exported = [
     "AsyncLoopContext",
+    "aclosing",
     "auto_aiter",
     "auto_await",
 ]
@@ -672,6 +676,7 @@ class Macro:
         catch_varargs: bool,
         caller: bool,
         default_autoescape: bool | None = None,
+        streaming: bool = False,
     ):
         self._environment = environment
         self._func = func
@@ -682,6 +687,7 @@ class Macro:
         self.catch_varargs = catch_varargs
         self.caller = caller
         self.explicit_caller = "caller" in arguments
+        self.streaming = streaming
 
         if default_autoescape is None:
             if callable(environment.autoescape):
@@ -770,6 +776,11 @@ class Macro:
         return self._invoke(arguments, autoescape)
 
     async def _async_invoke(self, arguments: list[t.Any], autoescape: bool) -> str:
+        if self.streaming:
+            return AsyncMacroStream(  # type: ignore
+                self._func(*arguments), autoescape, self._environment
+            )
+
         rv = await self._func(*arguments)  # type: ignore
 
         if autoescape:
@@ -783,6 +794,9 @@ class Macro:
 
         rv = self._func(*arguments)
 
+        if self.streaming:
+            return MacroStream(rv, autoescape, self._environment)  # type: ignore
+
         if autoescape:
             rv = Markup(rv)
 
@@ -791,6 +805,101 @@ class Macro:
     def __repr__(self) -> str:
         name = "anonymous" if self.name is None else repr(self.name)
         return f"<{type(self).__name__} {name}>"
+
+
+_stream_buffer_message = (
+    "A streaming macro result cannot be used in this position because it"
+    " would be buffered in full implicitly. Use the 'collect' filter to"
+    " explicitly collect the stream into a string, for example"
+    " {{ macro(...)|collect }}."
+)
+
+
+class MacroStream:
+    """The lazily produced output of a streaming macro.
+
+    Streaming macros are declared with ``{% macro name(...) streaming %}``.
+    When such a macro is called in a direct output position the template
+    engine iterates this object and yields each chunk as it is produced,
+    instead of buffering the full result first.  Anywhere a complete string
+    is required (concatenation, filters, assignment blocks, the body of a
+    regular macro, and so on) the stream must be collected explicitly with
+    the ``collect`` filter or :meth:`collect`; implicit conversion raises
+    :exc:`TemplateRuntimeError`.
+    """
+
+    def __init__(
+        self,
+        gen: t.Iterator[str],
+        autoescape: bool,
+        environment: "Environment",
+    ) -> None:
+        self._gen = gen
+        self._autoescape = autoescape
+        self._environment = environment
+
+    def _iterate(self) -> t.Iterator[str]:
+        """Internal iteration hook used by compiled templates."""
+        return self._gen
+
+    def collect(self) -> str:
+        """Consume the stream and return the full output as one string."""
+        rv = self._environment.concat(self._gen)
+
+        if self._autoescape:
+            return Markup(rv)
+
+        return rv
+
+    def __iter__(self) -> t.Iterator[str]:
+        raise TemplateRuntimeError(_stream_buffer_message)
+
+    def __str__(self) -> str:
+        raise TemplateRuntimeError(_stream_buffer_message)
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {id(self):#x}>"
+
+
+class AsyncMacroStream:
+    """The async variant of :class:`MacroStream`, produced by streaming
+    macros in environments with async support enabled.
+    """
+
+    def __init__(
+        self,
+        agen: t.AsyncIterator[str],
+        autoescape: bool,
+        environment: "Environment",
+    ) -> None:
+        self._agen = agen
+        self._autoescape = autoescape
+        self._environment = environment
+
+    def _iterate(self) -> t.AsyncIterator[str]:
+        """Internal iteration hook used by compiled templates."""
+        return self._agen
+
+    async def collect(self) -> str:
+        """Consume the stream and return the full output as one string."""
+        rv = self._environment.concat([item async for item in self._agen])
+
+        if self._autoescape:
+            return Markup(rv)
+
+        return rv
+
+    def __aiter__(self) -> t.AsyncIterator[str]:
+        raise TemplateRuntimeError(_stream_buffer_message)
+
+    def __iter__(self) -> t.Iterator[str]:
+        raise TemplateRuntimeError(_stream_buffer_message)
+
+    def __str__(self) -> str:
+        raise TemplateRuntimeError(_stream_buffer_message)
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {id(self):#x}>"
 
 
 class Undefined:

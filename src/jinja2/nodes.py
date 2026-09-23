@@ -348,6 +348,10 @@ class Macro(Stmt):
     """A macro definition.  `name` is the name of the macro, `args` a list of
     arguments and `defaults` a list of defaults if there are any.  `body` is
     a list of nodes for the macro body.
+
+    If `streaming` is true the macro was declared as a streaming macro and
+    produces its output incrementally when called in a direct output
+    position, instead of returning a fully buffered string.
     """
 
     fields = ("name", "args", "defaults", "body")
@@ -355,6 +359,7 @@ class Macro(Stmt):
     args: list["Name"]
     defaults: list["Expr"]
     body: list[Node]
+    streaming: bool = False
 
 
 class CallBlock(Stmt):

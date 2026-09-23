@@ -661,7 +661,17 @@ class CodeGenerator(NodeVisitor):
         self.writeline(f"{self.func('macro')}({', '.join(args)}):", node)
         self.indent()
 
-        self.buffer(frame)
+        streaming = getattr(node, "streaming", False)
+
+        if streaming:
+            # A streaming macro is a generator function that yields its
+            # output piece by piece instead of buffering it.  The dead
+            # branch makes sure the function is a generator even if the
+            # body contains no output statements.
+            self.writeline("if 0: yield None")
+        else:
+            self.buffer(frame)
+
         self.enter_frame(frame)
 
         self.push_parameter_definitions(frame)
@@ -684,7 +694,8 @@ class CodeGenerator(NodeVisitor):
         self.pop_parameter_definitions()
 
         self.blockvisit(node.body, frame)
-        self.return_buffer_contents(frame, force_unescaped=True)
+        if not streaming:
+            self.return_buffer_contents(frame, force_unescaped=True)
         self.leave_frame(frame, with_python_scope=True)
         self.outdent()
 
@@ -696,10 +707,12 @@ class CodeGenerator(NodeVisitor):
         name = getattr(macro_ref.node, "name", None)
         if len(macro_ref.node.args) == 1:
             arg_tuple += ","
+        streaming = getattr(macro_ref.node, "streaming", False)
         self.write(
             f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
             f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
-            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
+            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape,"
+            f" streaming={streaming!r})"
         )
 
     def position(self, node: nodes.Node) -> str:
@@ -1346,9 +1359,15 @@ class CodeGenerator(NodeVisitor):
         call_frame, macro_ref = self.macro_body(node, frame)
         self.writeline("caller = ")
         self.macro_def(macro_ref, call_frame)
-        self.start_write(frame, node)
+        value = self.temporary_identifier()
+        self.newline(node)
+        self.write(f"{value} = ")
         self.visit_Call(node.call, frame, forward_caller=True)
-        self.end_write(frame)
+
+        if frame.buffer is None:
+            self._write_streaming_output(node, frame, None, value)
+        else:
+            self._write_buffered_output(node, frame, None, value)
 
     def visit_FilterBlock(self, node: nodes.FilterBlock, frame: Frame) -> None:
         filter_frame = frame.inner()
@@ -1535,14 +1554,6 @@ class CodeGenerator(NodeVisitor):
             else:
                 body.append([const])
 
-        if frame.buffer is not None:
-            if len(body) == 1:
-                self.writeline(f"{frame.buffer}.append(")
-            else:
-                self.writeline(f"{frame.buffer}.extend((")
-
-            self.indent()
-
         for item in body:
             if isinstance(item, list):
                 # A group of constant data to join and output.
@@ -1551,27 +1562,97 @@ class CodeGenerator(NodeVisitor):
                 if frame.buffer is None:
                     self.writeline("yield " + val)
                 else:
-                    self.writeline(val + ",")
+                    self.writeline(f"{frame.buffer}.append({val})")
+
+                continue
+
+            # A node to be evaluated at runtime.  Evaluate it into a
+            # temporary first, so that a streaming macro result can be
+            # detected before finalize or escaping is applied.
+            value = self.temporary_identifier()
+            self.newline(item)
+            self.write(f"{value} = ")
+            self.visit(item, frame)
+
+            if frame.buffer is None:
+                self._write_streaming_output(item, frame, finalize, value)
             else:
-                if frame.buffer is None:
-                    self.writeline("yield ", item)
-                else:
-                    self.newline(item)
-
-                # A node to be evaluated at runtime.
-                self._output_child_pre(item, frame, finalize)
-                self.visit(item, frame)
-                self._output_child_post(item, frame, finalize)
-
-                if frame.buffer is not None:
-                    self.write(",")
-
-        if frame.buffer is not None:
-            self.outdent()
-            self.writeline(")" if len(body) == 1 else "))")
+                self._write_buffered_output(item, frame, finalize, value)
 
         if frame.require_output_check:
             self.outdent()
+
+    def _write_streaming_output(
+        self,
+        node: nodes.Node,
+        frame: Frame,
+        finalize: _FinalizeInfo | None,
+        value: str,
+    ) -> None:
+        """Write the output code for a runtime evaluated child of an
+        ``Output`` node in a frame that yields directly.  A streaming macro
+        result is flattened chunk by chunk, everything else is finalized
+        and yielded as before.  If ``finalize`` is None the value is
+        yielded as is, without escaping or finalization.
+        """
+        if self.environment.is_async:
+            self.writeline(f"if isinstance({value}, AsyncMacroStream):", node)
+            self.indent()
+            chunk = self.temporary_identifier()
+            stream = self.temporary_identifier()
+            self.writeline(f"async with aclosing({value}._iterate()) as {stream}:")
+            self.indent()
+            self.writeline(f"async for {chunk} in {stream}:")
+            self.indent()
+            self.writeline(f"yield {chunk}")
+            self.outdent()
+            self.outdent(2)
+        else:
+            self.writeline(f"if isinstance({value}, MacroStream):", node)
+            self.indent()
+            self.writeline(f"yield from {value}._iterate()")
+            self.outdent()
+
+        self.writeline("else:")
+        self.indent()
+        if finalize is None:
+            self.writeline(f"yield {value}")
+        else:
+            self.writeline("yield ")
+            self._output_child_pre(node, frame, finalize)
+            self.write(value)
+            self._output_child_post(node, frame, finalize)
+        self.outdent()
+
+    def _write_buffered_output(
+        self,
+        node: nodes.Node,
+        frame: Frame,
+        finalize: _FinalizeInfo | None,
+        value: str,
+    ) -> None:
+        """Write the output code for a runtime evaluated child of an
+        ``Output`` node in a buffered frame.  A streaming macro result is
+        rejected here, since the buffer would silently collect it in full.
+        If ``finalize`` is None the value is buffered as is, without
+        escaping or finalization.
+        """
+        from .runtime import _stream_buffer_message
+
+        self.writeline(
+            f"if isinstance({value}, (MacroStream, AsyncMacroStream)):", node
+        )
+        self.indent()
+        self.writeline(f"raise TemplateRuntimeError({_stream_buffer_message!r})")
+        self.outdent()
+        self.start_write(frame, node)
+        if finalize is None:
+            self.write(value)
+        else:
+            self._output_child_pre(node, frame, finalize)
+            self.write(value)
+            self._output_child_post(node, frame, finalize)
+        self.end_write(frame)
 
     def visit_Assign(self, node: nodes.Assign, frame: Frame) -> None:
         self.push_assign_tracking()

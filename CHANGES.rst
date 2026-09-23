@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add streaming macros, declared with ``{% macro name(...) streaming %}``.
+    A streaming macro yields its output incrementally when called in a
+    direct output position, in both sync and async environments, instead
+    of buffering the full result.  Positions that require a complete
+    string must use the new ``collect`` filter explicitly; implicit
+    buffering raises ``TemplateRuntimeError``.
 
 
 Version 3.1.6

@@ -19,6 +19,8 @@ from .async_utils import auto_aiter
 from .async_utils import auto_await
 from .async_utils import auto_to_list
 from .exceptions import FilterArgumentError
+from .runtime import AsyncMacroStream
+from .runtime import MacroStream
 from .runtime import Undefined
 from .utils import htmlsafe_json_dumps
 from .utils import pass_context
@@ -1366,6 +1368,39 @@ async def do_list(value: "t.AsyncIterable[V] | t.Iterable[V]") -> "list[V]":
     return await auto_to_list(value)
 
 
+def sync_do_collect(value: t.Any) -> str:
+    """Collect the result of a :ref:`streaming macro <streaming-macros>`
+    into a single string.  This is the explicit way to use a streaming
+    macro in a position that requires a complete string, such as
+    concatenation, assignment, or another filter::
+
+        {{ rows(data)|collect }}
+
+    .. versionadded:: 3.2
+    """
+    if isinstance(value, MacroStream):
+        return value.collect()
+
+    raise FilterArgumentError(
+        "can only collect the result of a streaming macro,"
+        f" got {type(value).__name__!r}"
+    )
+
+
+@async_variant(sync_do_collect)  # type: ignore
+async def do_collect(value: t.Any) -> str:
+    if isinstance(value, AsyncMacroStream):
+        return await value.collect()
+
+    if isinstance(value, MacroStream):
+        return value.collect()
+
+    raise FilterArgumentError(
+        "can only collect the result of a streaming macro,"
+        f" got {type(value).__name__!r}"
+    )
+
+
 def do_mark_safe(value: str) -> Markup:
     """Mark the value as safe which means that in an environment with automatic
     escaping enabled this variable will not be escaped.
@@ -1815,6 +1850,7 @@ FILTERS = {
     "batch": do_batch,
     "capitalize": do_capitalize,
     "center": do_center,
+    "collect": do_collect,
     "count": len,
     "d": do_default,
     "default": do_default,

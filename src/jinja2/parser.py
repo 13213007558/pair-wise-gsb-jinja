@@ -440,6 +440,7 @@ class Parser:
         node = nodes.Macro(lineno=next(self.stream).lineno)
         node.name = self.parse_assign_target(name_only=True).name
         self.parse_signature(node)
+        node.streaming = self.stream.skip_if("name:streaming")
         node.body = self.parse_statements(("name:endmacro",), drop_needle=True)
         return node
 
