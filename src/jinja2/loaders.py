@@ -14,6 +14,7 @@ from hashlib import sha1
 from importlib import import_module
 from types import ModuleType
 
+from .bccache import get_environment_checksum
 from .exceptions import TemplateNotFound
 from .utils import internalcode
 
@@ -676,6 +677,20 @@ class ModuleLoader(BaseLoader):
             # remove the entry from sys.modules, we only want the attribute
             # on the module object we have stored on the loader.
             sys.modules.pop(module, None)
+
+        # Modules compiled with different environment options are not
+        # valid for this environment.  Modules compiled before the
+        # checksum was recorded don't have it and are loaded as-is.
+        env_checksum = getattr(mod, "jinja2_environment_checksum", None)
+
+        if env_checksum is not None and env_checksum != get_environment_checksum(
+            environment
+        ):
+            raise TemplateNotFound(
+                name,
+                f"the compiled module for {name!r} was created with different"
+                " environment options, recompile the templates",
+            )
 
         if globals is None:
             globals = {}

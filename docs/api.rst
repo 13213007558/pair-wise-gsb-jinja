@@ -472,8 +472,15 @@ the application.
 
 To use a bytecode cache, instantiate it and pass it to the :class:`Environment`.
 
+Cached bytecode is only reused if the environment options that affect
+compilation are unchanged.  The cache key and checksum cover the template
+source, the loaded extensions (including their ``version``), and options
+such as ``undefined``, ``autoescape`` and ``optimized``.  If any of these
+change, the old cache entries are safely ignored.
+
 .. autoclass:: jinja2.BytecodeCache
-    :members: load_bytecode, dump_bytecode, clear
+    :members: load_bytecode, dump_bytecode, clear, get_cache_key,
+              get_source_checksum, get_environment_checksum
 
 .. autoclass:: jinja2.bccache.Bucket
     :members: write_bytecode, load_bytecode, bytecode_from_string,

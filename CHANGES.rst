@@ -14,6 +14,22 @@ Unreleased
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
 
+-   The bytecode cache is bound to the environment options that affect
+    compilation. The cache key and checksum now cover the environment's
+    extensions (identifier and ``version``), ``undefined``, ``autoescape``,
+    ``optimized``, and other compile options, so environments that share a
+    cache no longer reuse incompatible bytecode. Only stable, non-sensitive
+    values are included, never secrets or absolute paths.
+-   The bytecode cache file format no longer uses ``pickle``. The format
+    version is bumped to 6, and old cache files are treated as a cache miss
+    rather than being unpickled. Corrupt or truncated cache files are
+    treated as a cache miss.
+-   ``Extension`` has a ``version`` attribute that extensions can change to
+    invalidate bytecode caches when their compilation behavior changes.
+-   ``Environment.compile_templates`` records the environment checksum in
+    the generated modules, and ``ModuleLoader`` rejects modules that were
+    compiled with incompatible environment options.
+
 
 Version 3.1.6
 -------------

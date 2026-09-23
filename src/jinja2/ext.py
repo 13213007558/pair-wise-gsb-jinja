@@ -76,6 +76,13 @@ class Extension:
     def __init_subclass__(cls) -> None:
         cls.identifier = f"{cls.__module__}.{cls.__name__}"
 
+    #: An optional version for the extension.  If the way the extension
+    #: affects compiled templates changes, the version should be changed
+    #: as well so that bytecode caches are invalidated.
+    #:
+    #: .. versionadded:: 3.2
+    version: t.ClassVar[str | int | None] = None
+
     #: if this extension parses this is the list of tags it's listening to.
     tags: set[str] = set()
 

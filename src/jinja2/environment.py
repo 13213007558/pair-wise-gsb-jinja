@@ -16,6 +16,7 @@ from types import CodeType
 from markupsafe import Markup
 
 from . import nodes
+from .bccache import get_environment_checksum
 from .compiler import CodeGenerator
 from .compiler import generate
 from .defaults import BLOCK_END_STRING
@@ -850,6 +851,11 @@ class Environment:
         assert log_function is not None
         assert self.loader is not None, "No loader configured."
 
+        # Record the checksum of the environment options that affect
+        # compilation, so that the module loader can reject modules
+        # that were compiled with incompatible options.
+        env_checksum = get_environment_checksum(self)
+
         def write_file(filename: str, data: str) -> None:
             if zip:
                 info = ZipInfo(filename)
@@ -885,6 +891,7 @@ class Environment:
                     log_function(f'Could not compile "{name}": {e}')
                     continue
 
+                code = f"{code}\njinja2_environment_checksum = {env_checksum!r}\n"
                 filename = ModuleLoader.get_module_filename(name)
 
                 write_file(filename, code)
