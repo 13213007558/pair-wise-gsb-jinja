@@ -13,6 +13,9 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add the ``BaseLoader.get_source_async`` and ``BaseLoader.load_async``
+    loader contract. Async include, import, and extends lookups use it, while
+    synchronous lookups raise a clear error for async-only loaders.
 
 
 Version 3.1.6

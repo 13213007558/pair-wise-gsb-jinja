@@ -1016,7 +1016,12 @@ class CodeGenerator(NodeVisitor):
             else:
                 self.outdent()
 
-        self.writeline("parent_template = environment.get_template(", node)
+        if self.environment.is_async:
+            self.writeline(
+                "parent_template = await environment.get_template_async(", node
+            )
+        else:
+            self.writeline("parent_template = environment.get_template(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         self.writeline("for name, parent_block in parent_template.blocks.items():")
@@ -1039,16 +1044,18 @@ class CodeGenerator(NodeVisitor):
             self.writeline("try:")
             self.indent()
 
-        func_name = "get_or_select_template"
+        func_name = f"get_or_select_template{self.choose_async('_async')}"
         if isinstance(node.template, nodes.Const):
             if isinstance(node.template.value, str):
-                func_name = "get_template"
+                func_name = f"get_template{self.choose_async('_async')}"
             elif isinstance(node.template.value, (tuple, list)):
-                func_name = "select_template"
+                func_name = f"select_template{self.choose_async('_async')}"
         elif isinstance(node.template, (nodes.Tuple, nodes.List)):
-            func_name = "select_template"
+            func_name = f"select_template{self.choose_async('_async')}"
 
-        self.writeline(f"template = environment.{func_name}(", node)
+        self.writeline(
+            f"template = {self.choose_async('await ')}environment.{func_name}(", node
+        )
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         if node.ignore_missing:
@@ -1094,9 +1101,15 @@ class CodeGenerator(NodeVisitor):
     def _import_common(
         self, node: nodes.Import | nodes.FromImport, frame: Frame
     ) -> None:
-        self.write(f"{self.choose_async('await ')}environment.get_template(")
+        if self.environment.is_async:
+            self.write("await (await environment.get_template_async(")
+        else:
+            self.write("environment.get_template(")
         self.visit(node.template, frame)
-        self.write(f", {self.name!r}).")
+        if self.environment.is_async:
+            self.write(f", {self.name!r})).")
+        else:
+            self.write(f", {self.name!r}).")
 
         if node.with_context:
             f_name = f"make_module{self.choose_async('_async')}"

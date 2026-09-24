@@ -80,9 +80,11 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 <jinja-extensions>`.
 
 .. autoclass:: Environment([options])
-    :members: from_string, get_template, select_template,
-              get_or_select_template, join_path, extend, compile_expression,
-              compile_templates, list_templates, add_extension
+    :members: from_string, get_template, get_template_async,
+              select_template, select_template_async,
+              get_or_select_template, get_or_select_template_async, join_path,
+              extend, compile_expression, compile_templates, list_templates,
+              add_extension
 
     .. attribute:: shared
 
@@ -437,8 +439,13 @@ size by default and templates are automatically reloaded.
 All loaders are subclasses of :class:`BaseLoader`.  If you want to create your
 own loader, subclass :class:`BaseLoader` and override `get_source`.
 
+Async renders can use loaders that override ``get_source_async``. Loaders that
+override ``get_source`` continue to work in async renders. An async-only loader
+cannot be used by a synchronous render or template lookup; that raises a
+:exc:`RuntimeError` instead of calling the asynchronous method synchronously.
+
 .. autoclass:: jinja2.BaseLoader
-    :members: get_source, load
+    :members: get_source, get_source_async, load, load_async
 
 Here a list of the builtin loaders Jinja provides:
 

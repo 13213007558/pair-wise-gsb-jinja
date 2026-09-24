@@ -1,10 +1,15 @@
+import asyncio
+
 import pytest
+
+from jinja2 import BaseLoader
 
 from jinja2 import ChainableUndefined
 from jinja2 import DictLoader
 from jinja2 import Environment
 from jinja2 import Template
 from jinja2.async_utils import auto_aiter
+from jinja2.bccache import BytecodeCache
 from jinja2.exceptions import TemplateNotFound
 from jinja2.exceptions import TemplatesNotFound
 from jinja2.exceptions import UndefinedError
@@ -718,3 +723,301 @@ def test_async_extend(run_async_fn, test_env_async):
 
     rv = run_async_fn(func)
     assert rv == "["
+
+
+class GatedAsyncLoader(BaseLoader):
+    def __init__(self, sources):
+        self.sources = sources
+        self.events = {name: asyncio.Event() for name in sources}
+        self.load_calls = []
+
+    async def _wait_for_source(self, name):
+        await self.events[name].wait()
+        return self.sources[name], None, lambda: True
+
+    async def get_source_async(self, environment, template):
+        if template not in self.sources:
+            raise TemplateNotFound(template)
+
+        coroutine = self._wait_for_source(template)
+        self.load_calls.append(coroutine)
+        return await coroutine
+
+    def release(self, name):
+        self.events.setdefault(name, asyncio.Event()).set()
+
+    @property
+    def call_count(self):
+        return len(self.load_calls)
+
+
+class AsyncOnlyLoader(GatedAsyncLoader):
+    pass
+
+
+class MemoryBytecodeCache(BytecodeCache):
+    def __init__(self):
+        self.data = {}
+        self.loads = 0
+        self.dumps = 0
+
+    def load_bytecode(self, bucket):
+        self.loads += 1
+        if bucket.key in self.data:
+            bucket.bytecode_from_string(self.data[bucket.key])
+
+    def dump_bytecode(self, bucket):
+        self.dumps += 1
+        self.data[bucket.key] = bucket.bytecode_to_string()
+
+
+class CompileEnvironment(Environment):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.compile_event = asyncio.Event()
+        self.compile_calls = []
+
+    def compile(self, *args, **kwargs):
+        async def compile_source():
+            await self.compile_event.wait()
+            return Environment.compile(self, *args, **kwargs)
+
+        coroutine = compile_source()
+        self.compile_calls.append(coroutine)
+        return coroutine
+
+
+def test_async_only_loader_sync_error():
+    loader = AsyncOnlyLoader({"index": "sync"})
+    env = Environment(loader=loader)
+
+    with pytest.raises(RuntimeError, match="asynchronous source loading"):
+        env.get_template("index")
+
+    with pytest.raises(RuntimeError, match="asynchronous source loading"):
+        loader.get_source(env, "index")
+
+
+def test_sync_loader_is_used_in_async_render(run_async_fn):
+    loader = DictLoader({"index": "rendered"})
+    env = Environment(loader=loader, enable_async=True)
+    template = env.from_string('{% include "index" %}')
+
+    assert run_async_fn(template.render_async) == "rendered"
+    assert env.get_template("index").render() == "rendered"
+
+
+def test_async_only_loader_basic_paths():
+    loader = AsyncOnlyLoader(
+        {
+            "include": "included",
+            "import": "{% macro value() %}imported{% endmacro %}",
+            "parent": "parent{% block content %}default{% endblock %}",
+        }
+    )
+    env = Environment(loader=loader, enable_async=True)
+    for name in loader.events:
+        loader.release(name)
+
+    async def render():
+        included = env.from_string('{% include "include" %}')
+        imported = env.from_string(
+            '{% import "import" as module %}{{ module.value() }}'
+        )
+        child = env.from_string(
+            '{% extends "parent" %}{% block content %}child{% endblock %}'
+        )
+        selected = env.from_string('{% include ["missing", "include"] %}')
+        return [
+            await included.render_async(),
+            await imported.render_async(),
+            await child.render_async(),
+            await selected.render_async(),
+        ]
+
+    assert asyncio.run(render()) == [
+        "included",
+        "imported",
+        "parentchild",
+        "included",
+    ]
+    assert loader.call_count == 3
+
+
+def test_async_only_loader_nested_include_and_cache():
+    loader = AsyncOnlyLoader(
+        {"outer": "outer[{% include 'inner' %}]", "inner": "inner"}
+    )
+    env = Environment(loader=loader, enable_async=True)
+
+    async def render():
+        loading = asyncio.create_task(env.get_template_async("outer"))
+        await asyncio.sleep(0)
+        loader.release("outer")
+        template = await loading
+
+        rendering = asyncio.create_task(template.render_async())
+        await asyncio.sleep(0)
+        loader.release("inner")
+        first = await rendering
+        second = await template.render_async()
+        return first, second
+
+    first, second = asyncio.run(render())
+    assert (first, second) == ("outer[inner]", "outer[inner]")
+    assert loader.call_count == 2
+    assert len(env.cache) == 2
+
+
+def test_async_only_loader_bytecode_cache_does_not_cache_coroutine():
+    bcc = MemoryBytecodeCache()
+    loader = AsyncOnlyLoader({"index": "rendered"})
+    loader.release("index")
+
+    async def load_twice():
+        first_env = Environment(
+            loader=loader, enable_async=True, bytecode_cache=bcc
+        )
+        first = await first_env.get_template_async("index")
+
+        second_env = Environment(
+            loader=loader, enable_async=True, bytecode_cache=bcc
+        )
+        second = await second_env.get_template_async("index")
+        return first, second
+
+    first, second = asyncio.run(load_twice())
+    assert first.render() == second.render() == "rendered"
+    assert loader.call_count == 2
+    assert loader.load_calls[0] is not loader.load_calls[1]
+    assert bcc.dumps == 1
+    assert bcc.loads == 2
+
+
+def test_concurrent_same_template_uses_distinct_source_coroutines():
+    loader = AsyncOnlyLoader({"index": "rendered"})
+    env = Environment(loader=loader, enable_async=True)
+
+    async def render():
+        first = asyncio.create_task(env.get_template_async("index"))
+        second = asyncio.create_task(env.get_template_async("index"))
+        await asyncio.sleep(0)
+        loader.release("index")
+        first, second = await asyncio.gather(first, second)
+        rendered = await asyncio.gather(
+            first.render_async(), second.render_async()
+        )
+        return first, second, rendered
+
+    first, second, rendered = asyncio.run(render())
+    assert rendered == ["rendered", "rendered"]
+    assert loader.call_count == 2
+    assert loader.load_calls[0] is not loader.load_calls[1]
+    assert len(env.cache) == 1
+    assert first is not second
+
+
+def test_cancel_closes_source_coroutine_and_does_not_cache_template():
+    loader = AsyncOnlyLoader({"index": "rendered"})
+    env = Environment(loader=loader, enable_async=True)
+
+    async def load():
+        loading = asyncio.create_task(env.get_template_async("index"))
+        await asyncio.sleep(0)
+        loading.cancel()
+        await loading
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(load())
+
+    assert loader.load_calls[0].cr_frame is None
+    assert len(env.cache) == 0
+
+
+def test_cancel_compile_clears_bytecode_bucket_reference():
+    bcc = MemoryBytecodeCache()
+    loader = AsyncOnlyLoader({"index": "rendered"})
+    loader.release("index")
+    env = CompileEnvironment(
+        loader=loader, enable_async=True, bytecode_cache=bcc
+    )
+
+    async def load():
+        loading = asyncio.create_task(env.get_template_async("index"))
+        await asyncio.sleep(0)
+        loading.cancel()
+        await loading
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(load())
+
+    assert env.compile_calls[0].cr_frame is None
+    assert next(iter(bcc.data.values()), None) is None
+    assert bcc.dumps == 0
+    assert len(env.cache) == 0
+
+
+def test_cancel_render_callback_closes_coroutine_without_retry():
+    loader = AsyncOnlyLoader({"index": "before{{ callback() }}after"})
+    loader.release("index")
+    env = Environment(loader=loader, enable_async=True)
+    callback_calls = []
+    callback_event = asyncio.Event()
+    rendered = []
+
+    async def _wait_for_callback():
+        await callback_event.wait()
+        return "callback"
+
+    async def callback():
+        coroutine = _wait_for_callback()
+        callback_calls.append(coroutine)
+        return await coroutine
+
+    env.globals["callback"] = callback
+
+    async def collect():
+        template = await env.get_template_async("index")
+        async for part in template.generate_async():
+            rendered.append(part)
+
+    async def cancel():
+        rendering = asyncio.create_task(collect())
+        await asyncio.sleep(0)
+        rendering.cancel()
+        await rendering
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(cancel())
+
+    assert rendered == ["before"]
+    assert len(callback_calls) == 1
+    assert callback_calls[0].cr_frame is None
+
+
+def test_cancel_while_include_waits_keeps_emitted_parts():
+    loader = AsyncOnlyLoader(
+        {"outer": "before{% include 'inner' %}after", "inner": "inner"}
+    )
+    env = Environment(loader=loader, enable_async=True)
+    rendered = []
+
+    async def collect(template):
+        async for part in template.generate_async():
+            rendered.append(part)
+
+    async def render():
+        loader.release("outer")
+        template = await env.get_template_async("outer")
+        rendering = asyncio.create_task(collect(template))
+        await asyncio.sleep(0)
+        rendering.cancel()
+        await rendering
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(render())
+
+    assert rendered == ["before"]
+    assert loader.call_count == 2
+    assert loader.load_calls[1].cr_frame is None
+    assert "inner" not in env.cache

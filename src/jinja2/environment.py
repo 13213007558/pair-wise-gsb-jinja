@@ -978,6 +978,31 @@ class Environment:
         return template
 
     @internalcode
+    async def _load_template_async(
+        self, name: str, globals: t.MutableMapping[str, t.Any] | None
+    ) -> "Template":
+        if self.loader is None:
+            raise TypeError("no loader for this environment specified")
+        cache_key = (weakref.ref(self.loader), name)
+        if self.cache is not None:
+            template = self.cache.get(cache_key)
+            if template is not None and (
+                not self.auto_reload or template.is_up_to_date
+            ):
+                if globals:
+                    template.globals.update(globals)
+
+                return template
+
+        template = await self.loader.load_async(
+            self, name, self.make_globals(globals)
+        )
+
+        if self.cache is not None:
+            self.cache[cache_key] = template
+        return template
+
+    @internalcode
     def get_template(
         self,
         name: t.Union[str, "Template"],
@@ -1013,6 +1038,20 @@ class Environment:
             name = self.join_path(name, parent)
 
         return self._load_template(name, globals)
+
+    @internalcode
+    async def get_template_async(
+        self,
+        name: t.Union[str, "Template"],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if isinstance(name, Template):
+            return name
+        if parent is not None:
+            name = self.join_path(name, parent)
+
+        return await self._load_template_async(name, globals)
 
     @internalcode
     def select_template(
@@ -1069,6 +1108,32 @@ class Environment:
         raise TemplatesNotFound(names)  # type: ignore
 
     @internalcode
+    async def select_template_async(
+        self,
+        names: t.Iterable[t.Union[str, "Template"]],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if isinstance(names, Undefined):
+            names._fail_with_undefined_error()
+
+        if not names:
+            raise TemplatesNotFound(
+                message="Tried to select from an empty list of templates."
+            )
+
+        for name in names:
+            if isinstance(name, Template):
+                return name
+            if parent is not None:
+                name = self.join_path(name, parent)
+            try:
+                return await self._load_template_async(name, globals)
+            except (TemplateNotFound, UndefinedError):
+                pass
+        raise TemplatesNotFound(names)  # type: ignore
+
+    @internalcode
     def get_or_select_template(
         self,
         template_name_or_list: t.Union[str, "Template", list[t.Union[str, "Template"]]],
@@ -1085,6 +1150,23 @@ class Environment:
         elif isinstance(template_name_or_list, Template):
             return template_name_or_list
         return self.select_template(template_name_or_list, parent, globals)
+
+    @internalcode
+    async def get_or_select_template_async(
+        self,
+        template_name_or_list: t.Union[str, "Template", list[t.Union[str, "Template"]]],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if isinstance(template_name_or_list, (str, Undefined)):
+            return await self.get_template_async(
+                template_name_or_list, parent, globals
+            )
+        elif isinstance(template_name_or_list, Template):
+            return template_name_or_list
+        return await self.select_template_async(
+            template_name_or_list, parent, globals
+        )
 
     def from_string(
         self,
