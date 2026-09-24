@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   ``NativeEnvironment`` applies consistent rules when converting rendered
+    output to native Python types. A single node returns its object
+    unchanged, ``Markup`` is preserved instead of being parsed as a Python
+    literal, and multi-node output is only converted when it safely parses
+    with ``ast.literal_eval``. ``NativeEnvironment(native_strict=True)``
+    raises a ``ValueError`` instead of falling back to a string.
 
 
 Version 3.1.6
