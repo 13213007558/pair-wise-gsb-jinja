@@ -366,6 +366,16 @@ class CodeGenerator(NodeVisitor):
         # Tracks parameter definition blocks
         self._param_def_block: list[set[str]] = []
 
+        # Tracks the symbol tables of for-loop frames whose body is
+        # currently being compiled, along with the names of macros
+        # defined in the loop.  Macro and call block definitions inside
+        # a loop use this to snapshot iteration-local variables, so that
+        # a macro object created in one iteration does not see the loop
+        # state of a later (or already finished) iteration when it is
+        # called.  Macro names are excluded since they must bind late
+        # for recursion to work.
+        self._for_frame_symbols: list[tuple[Symbols, set[str]]] = []
+
         # Tracks the current context.
         self._context_reference_stack = ["context"]
 
@@ -607,6 +617,68 @@ class CodeGenerator(NodeVisitor):
     def func(self, name: str) -> str:
         return f"{self.choose_async()}def {name}"
 
+    def loop_frame_snapshot_args(
+        self, node: nodes.Macro | nodes.CallBlock, frame: Frame
+    ) -> list[str]:
+        """Build default-value parameters that snapshot the iteration-local
+        variables of enclosing for loops at the point where a macro or call
+        block is defined.
+
+        A macro object created inside a loop closes over the loop frame's
+        variables, which are rebound on every iteration and cleared when
+        the loop ends.  If the object is called after the defining
+        iteration has advanced (recursive or deferred calls, a caller
+        stored for later use, a macro passed as a parameter) it would
+        otherwise observe the loop state of a later or already finished
+        iteration.  Binding the current values as default arguments gives
+        every definition its own independent view of the loop frame.
+        """
+        if not self._for_frame_symbols:
+            return []
+
+        candidates: dict[str, str] = {}
+        loop_refs: set[str] = set()
+
+        for symbols, macro_names in self._for_frame_symbols:
+            for name in symbols.stores:
+                # Names assigned by macro definitions in the loop must
+                # keep late binding so that recursive macros work.
+                if name in macro_names:
+                    continue
+
+                ref = symbols.ref(name)
+                candidates[name] = ref
+
+                # The special loop variable is declared as a parameter of
+                # the loop frame.  It is a single object mutated while
+                # iterating, so it must be copied rather than only bound.
+                if name == "loop" and symbols.loads.get(ref) == (
+                    VAR_LOAD_PARAMETER,
+                    None,
+                ):
+                    loop_refs.add(ref)
+
+        captured = find_undeclared(chain(node.body, node.defaults), tuple(candidates))
+        snapshot_args = []
+
+        for name in sorted(captured):
+            # Names stored by the macro itself (its arguments and local
+            # assignments) shadow the loop variables.
+            if name in frame.symbols.stores:
+                continue
+
+            ref = frame.symbols.find_ref(name)
+
+            # Only snapshot if the reference the macro closes over is the
+            # loop frame's own variable, not an intermediate scope.
+            if ref is not None and ref == candidates[name]:
+                if ref in loop_refs:
+                    snapshot_args.append(f"{ref}={ref}.copy()")
+                else:
+                    snapshot_args.append(f"{ref}={ref}")
+
+        return snapshot_args
+
     def macro_body(
         self, node: nodes.Macro | nodes.CallBlock, frame: Frame
     ) -> tuple[Frame, MacroRef]:
@@ -658,7 +730,10 @@ class CodeGenerator(NodeVisitor):
         # macros are delayed, they never require output checks
         frame.require_output_check = False
         frame.symbols.analyze_node(node)
-        self.writeline(f"{self.func('macro')}({', '.join(args)}):", node)
+        snapshot_args = self.loop_frame_snapshot_args(node, frame)
+        self.writeline(
+            f"{self.func('macro')}({', '.join(args + snapshot_args)}):", node
+        )
         self.indent()
 
         self.buffer(frame)
@@ -1275,7 +1350,10 @@ class CodeGenerator(NodeVisitor):
         self.enter_frame(loop_frame)
 
         self.writeline("_loop_vars = {}")
+        macro_names = {m.name for m in node.find_all(nodes.Macro)}
+        self._for_frame_symbols.append((loop_frame.symbols, macro_names))
         self.blockvisit(node.body, loop_frame)
+        self._for_frame_symbols.pop()
         if node.else_:
             self.writeline(f"{iteration_indicator} = 0")
         self.outdent()

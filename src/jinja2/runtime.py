@@ -558,6 +558,34 @@ class LoopContext:
     def __iter__(self) -> "LoopContext":
         return self
 
+    def copy(self) -> "LoopContext":
+        """Return a snapshot of the loop's current state.
+
+        The same LoopContext object is mutated as a loop iterates, so
+        macros and call blocks defined inside a loop capture the live
+        object and would otherwise observe a later (or finished) state
+        when called after the defining iteration.  The compiler binds
+        this copy as a default argument of the generated macro function
+        so that each definition sees the loop as it was at that point.
+
+        The copy shares the iterable but never consumes the original
+        iterator.  If the length is not yet known and cannot be
+        determined cheaply, the copy is given an exhausted iterator so
+        that it cannot disturb the loop it was copied from.
+        """
+        rv = object.__new__(type(self))
+        rv.__dict__.update(self.__dict__)
+
+        if rv._length is None:
+            try:
+                rv._length = len(self._iterable)  # type: ignore
+            except TypeError:
+                rv._iterator = self._to_iterator(iter(()))
+        else:
+            rv._iterator = self._to_iterator(iter(()))
+
+        return rv
+
     def __next__(self) -> tuple[t.Any, "LoopContext"]:
         if self._after is not missing:
             rv = self._after

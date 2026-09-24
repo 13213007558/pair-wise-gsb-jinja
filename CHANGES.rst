@@ -13,6 +13,13 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Macros and call blocks defined inside a for loop snapshot the loop's
+    variables (including the special loop variable) at the point of
+    definition.  A macro or caller object that is called after its
+    defining iteration has advanced -- for example a stored caller, a
+    recursive call, or a macro passed as a parameter -- now sees the
+    values from its own iteration instead of the loop's later or
+    cleared state.
 
 
 Version 3.1.6
