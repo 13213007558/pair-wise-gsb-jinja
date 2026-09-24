@@ -1,11 +1,15 @@
 import math
+from functools import partial
 
 import pytest
+from markupsafe import Markup
 
 from jinja2.exceptions import UndefinedError
 from jinja2.nativetypes import NativeEnvironment
 from jinja2.nativetypes import NativeTemplate
-from jinja2.runtime import Undefined
+from jinja2.nativetypes import native_concat
+from jinja2.runtime import DebugUndefined
+from jinja2.runtime import StrictUndefined
 
 
 @pytest.fixture
@@ -25,7 +29,36 @@ def test_is_defined_native_return(env):
 
 def test_undefined_native_return(env):
     t = env.from_string("{{ missing }}")
-    assert isinstance(t.render(), Undefined)
+    # The default undefined policy renders an empty string, the
+    # object is not returned silently.
+    assert t.render() == ""
+
+
+def test_strict_undefined_native_return():
+    env = NativeEnvironment(undefined=StrictUndefined)
+    t = env.from_string("{{ missing }}")
+
+    with pytest.raises(UndefinedError):
+        t.render()
+
+
+def test_debug_undefined_native_return():
+    env = NativeEnvironment(undefined=DebugUndefined)
+    t = env.from_string("{{ missing }}")
+    assert t.render() == "{{ missing }}"
+
+
+def test_undefined_in_concat(env):
+    t = env.from_string("x{{ missing }}")
+    assert t.render() == "x"
+
+
+def test_strict_undefined_in_concat():
+    env = NativeEnvironment(undefined=StrictUndefined)
+    t = env.from_string("x{{ missing }}")
+
+    with pytest.raises(UndefinedError):
+        t.render()
 
 
 def test_adding_undefined_native_return(env):
@@ -187,3 +220,247 @@ def test_block(env):
     result = t.render()
     assert result == 11
     assert isinstance(result, int)
+
+
+def test_nested_dict_list_roundtrip(env):
+    value = {
+        "list": [1, 2.5, (3, 4)],
+        "dict": {"a": None, "b": True, "c": False},
+        "unicode": "h\xe9llo \u4f60\u597d \U0001f600",
+    }
+    result = env.from_string("{{ x }}").render(x=value)
+    assert result == value
+    assert isinstance(result, dict)
+    assert isinstance(result["list"], list)
+    assert isinstance(result["list"][2], tuple)
+
+
+def test_nested_dict_list_from_string(env):
+    t = env.from_string("{{ x|string }}")
+    result = t.render(x={"a": [1, (2, 3)], "b": None, "c": "h\xe9llo"})
+    assert result == {"a": [1, (2, 3)], "b": None, "c": "h\xe9llo"}
+
+
+def test_nested_dict_list_roundtrip_async(async_native_env, run_async_fn):
+    async def async_render():
+        value = {"a": [1, (2, 3)], "b": None, "c": "h\xe9llo"}
+        t = async_native_env.from_string("{{ x }}")
+        result = await t.render_async(x=value)
+        assert result == value
+        assert isinstance(result, dict)
+
+    run_async_fn(async_render)
+
+
+def test_duplicate_keys(env):
+    # Later keys win, the same as Python, without executing anything.
+    result = env.from_string("{{ x }}").render(x="{'a': 1, 'a': 2}")
+    assert result == {"a": 2}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "__import__('os').system('echo pwned')",
+        "().__class__.__bases__[0].__subclasses__()",
+        "open('/etc/passwd').read()",
+        "lambda: 1",
+        "f'{1 + 1}'",
+        "(x for x in range(3))",
+    ],
+)
+def test_malicious_literal_not_evaluated(env, value):
+    # Values that aren't simple literals are never evaluated, they are
+    # returned as strings.
+    result = env.from_string("{{ x }}").render(x=value)
+    assert isinstance(result, str)
+    assert result == value
+
+
+def test_unclosed_literal(env):
+    result = env.from_string("{{ x }}").render(x="[1, 2")
+    assert isinstance(result, str)
+    assert result == "[1, 2"
+
+
+def test_deeply_nested_literal_safe(env):
+    # A pathological literal must not crash the parser, it's returned
+    # as a string instead.
+    value = "[" * 1000
+    result = env.from_string("{{ x }}").render(x=value)
+    assert result == value
+
+
+def test_custom_object_single_node(env):
+    class Foo:
+        def __repr__(self):
+            return "Foo()"
+
+    foo = Foo()
+    result = env.from_string("{{ x }}").render(x=foo)
+    assert result is foo
+
+
+def test_custom_object_in_concat(env):
+    class Foo:
+        def __str__(self):
+            return "Foo()"
+
+    result = env.from_string("{{ x }} + {{ y }}").render(x=Foo(), y=2)
+    assert isinstance(result, str)
+    assert result == "Foo() + 2"
+
+
+def test_adjacent_expressions(env):
+    # Adjacent expressions are joined before parsing, so two numbers
+    # become one number.
+    result = env.from_string("{{ a }}{{ b }}").render(a=1, b=2)
+    assert result == 12
+
+
+def test_adjacent_expressions_with_space(env):
+    result = env.from_string("{{ a }} {{ b }}").render(a=1, b=2)
+    assert isinstance(result, str)
+    assert result == "1 2"
+
+
+def test_markup_single_node(env):
+    result = env.from_string("{{ x }}").render(x=Markup("<b>1</b>"))
+    assert isinstance(result, Markup)
+    assert result == "<b>1</b>"
+
+
+def test_markup_concat_preserved(env):
+    result = env.from_string("{{ x }}!").render(x=Markup("<b>"))
+    assert isinstance(result, Markup)
+    assert result == "<b>!"
+
+
+def test_markup_literal_parsed(env):
+    # A Markup string that looks like a literal is still parsed.
+    result = env.from_string("{{ x }}").render(x=Markup("[1, 2]"))
+    assert result == [1, 2]
+
+
+def test_autoescape_escapes():
+    env = NativeEnvironment(autoescape=True)
+    result = env.from_string("{{ x }}").render(x="<b>")
+    assert isinstance(result, Markup)
+    assert result == "&lt;b&gt;"
+
+
+def test_autoescape_concat():
+    env = NativeEnvironment(autoescape=True)
+    result = env.from_string("{{ x }}!").render(x="<b>")
+    assert isinstance(result, Markup)
+    assert result == "&lt;b&gt;!"
+
+
+def test_autoescape_safe_not_double_escaped():
+    env = NativeEnvironment(autoescape=True)
+    result = env.from_string("{{ x }}").render(x=Markup("<b>"))
+    assert isinstance(result, Markup)
+    assert result == "<b>"
+
+
+def test_autoescape_async(run_async_fn):
+    env = NativeEnvironment(autoescape=True, enable_async=True)
+
+    async def async_render():
+        result = await env.from_string("{{ x }}").render_async(x="<b>")
+        assert isinstance(result, Markup)
+        assert result == "&lt;b&gt;"
+
+    run_async_fn(async_render)
+
+
+def test_finalize():
+    env = NativeEnvironment(finalize=lambda v: v * 2 if isinstance(v, int) else v)
+    result = env.from_string("{{ x }}").render(x=21)
+    assert result == 42
+
+
+def test_macro_return_value(env):
+    # Without autoescape a macro returns a plain string.
+    t = env.from_string("{%- macro m() -%}hi{%- endmacro -%}{{ m() }}")
+    result = t.render()
+    assert isinstance(result, str)
+    assert result == "hi"
+
+
+def test_macro_returns_markup_autoescape():
+    env = NativeEnvironment(autoescape=True)
+    t = env.from_string("{%- macro m() -%}hi{%- endmacro -%}{{ m() }}")
+    result = t.render()
+    assert isinstance(result, Markup)
+    assert result == "hi"
+
+
+def test_loop_async(async_native_env, run_async_fn):
+    async def async_render():
+        t = async_native_env.from_string("{% for x in value %}{{ x }}{% endfor %}")
+        result = await t.render_async(value=[1, 2, 3])
+        assert result == 123
+
+    run_async_fn(async_render)
+
+
+def test_strict_undefined_async(run_async_fn):
+    env = NativeEnvironment(undefined=StrictUndefined, enable_async=True)
+
+    async def async_render():
+        t = env.from_string("{{ missing }}")
+
+        with pytest.raises(UndefinedError):
+            await t.render_async()
+
+    run_async_fn(async_render)
+
+
+def test_whitespace_around_expression(env):
+    # Leading whitespace prevents parsing, trailing does not.
+    assert env.from_string(" {{ x }}").render(x=1) == " 1"
+    assert env.from_string("{{ x }} ").render(x=1) == 1
+    assert env.from_string(" ").render() == " "
+
+
+def test_empty_template(env):
+    assert env.from_string("").render() is None
+
+
+def test_native_concat_strict():
+    with pytest.raises(ValueError):
+        native_concat(iter(["not a literal"]), strict=True)
+
+    assert native_concat(iter(["[1, 2]"]), strict=True) == [1, 2]
+    # A single non-string node is returned as-is even in strict mode.
+    foo = object()
+    assert native_concat(iter([foo]), strict=True) is foo
+
+
+def test_strict_environment():
+    class StrictNativeEnvironment(NativeEnvironment):
+        concat = staticmethod(partial(native_concat, strict=True))
+
+    env = StrictNativeEnvironment()
+    assert env.from_string("{{ x }}").render(x="[1, 2]") == [1, 2]
+    assert env.from_string("{{ x }}").render(x=3) == 3
+
+    with pytest.raises(ValueError):
+        env.from_string("{{ x }}").render(x="hello")
+
+
+def test_strict_environment_async(run_async_fn):
+    class StrictNativeEnvironment(NativeEnvironment):
+        concat = staticmethod(partial(native_concat, strict=True))
+
+    env = StrictNativeEnvironment(enable_async=True)
+
+    async def async_render():
+        t = env.from_string("{{ x }}")
+        assert await t.render_async(x="{'a': 1}") == {"a": 1}
+
+        with pytest.raises(ValueError):
+            await t.render_async(x="hello")
+
+    run_async_fn(async_render)

@@ -5,22 +5,48 @@ from itertools import chain
 from itertools import islice
 from types import GeneratorType
 
+from markupsafe import escape
+from markupsafe import Markup
+
 from . import nodes
 from .compiler import CodeGenerator
 from .compiler import Frame
 from .compiler import has_safe_repr
 from .environment import Environment
 from .environment import Template
+from .runtime import Undefined
 
 
-def native_concat(values: t.Iterable[t.Any]) -> t.Any | None:
+def native_concat(values: t.Iterable[t.Any], *, strict: bool = False) -> t.Any | None:
     """Return a native Python type from the list of compiled nodes. If
     the result is a single node, its value is returned. Otherwise, the
     nodes are concatenated as strings. If the result can be parsed with
     :func:`ast.literal_eval`, the parsed value is returned. Otherwise,
     the string is returned.
 
+    A single node that is not a string is returned unchanged, preserving
+    its type. A single :class:`~jinja2.runtime.Undefined` node is
+    converted with ``str()`` so that the environment's undefined policy
+    is applied rather than silently returning the object.
+
+    When concatenating multiple nodes, if any node is
+    :class:`markupsafe.Markup`, the joined string keeps the ``Markup``
+    type if it is not parsed as a literal.
+
+    Parsing uses :func:`ast.literal_eval`, which only creates simple
+    Python types and never executes code. Nested numbers, booleans,
+    ``None``, Unicode strings, and dicts with duplicate keys are handled
+    safely.
+
     :param values: Iterable of outputs to concatenate.
+    :param strict: If ``True``, raise a :exc:`ValueError` if the
+        concatenated nodes can't be parsed as a Python literal, instead
+        of falling back to returning a string.
+
+    .. versionchanged:: 3.2
+        A single ``Undefined`` node applies the undefined policy instead
+        of being returned silently. ``Markup`` is preserved when
+        concatenating. Added the ``strict`` parameter.
     """
     head = list(islice(values, 2))
 
@@ -29,12 +55,35 @@ def native_concat(values: t.Iterable[t.Any]) -> t.Any | None:
 
     if len(head) == 1:
         raw = head[0]
+
         if not isinstance(raw, str):
-            return raw
+            if isinstance(raw, Undefined):
+                # Don't return an undefined object silently, apply the
+                # environment's policy. ``Undefined`` becomes an empty
+                # string, ``DebugUndefined`` becomes a message, and
+                # ``StrictUndefined`` raises ``UndefinedError``.
+                raw = str(raw)
+            else:
+                return raw
     else:
         if isinstance(values, GeneratorType):
             values = chain(head, values)
-        raw = "".join([str(v) for v in values])
+
+        strings = []
+        has_markup = False
+
+        for value in values:
+            if isinstance(value, Markup):
+                has_markup = True
+
+            strings.append(str(value))
+
+        raw = "".join(strings)
+
+        if has_markup:
+            # If any node was Markup, the concatenation should remain
+            # Markup if it's not parsed as a literal below.
+            raw = Markup(raw)
 
     try:
         return literal_eval(
@@ -43,7 +92,12 @@ def native_concat(values: t.Iterable[t.Any]) -> t.Any | None:
             # parse the string ourselves without removing leading spaces/tabs.
             parse(raw, mode="eval")
         )
-    except (ValueError, SyntaxError, MemoryError):
+    except (ValueError, SyntaxError, MemoryError, RecursionError) as e:
+        if strict:
+            raise ValueError(
+                f"Could not convert the rendered value to a Python literal: {raw!r}"
+            ) from e
+
         return raw
 
 
@@ -64,6 +118,9 @@ class NativeCodeGenerator(CodeGenerator):
     ) -> t.Any:
         const = node.as_const(frame.eval_ctx)
 
+        if frame.eval_ctx.autoescape:
+            const = escape(const)
+
         if not has_safe_repr(const):
             raise nodes.Impossible()
 
@@ -75,12 +132,20 @@ class NativeCodeGenerator(CodeGenerator):
     def _output_child_pre(
         self, node: nodes.Expr, frame: Frame, finalize: CodeGenerator._FinalizeInfo
     ) -> None:
+        if frame.eval_ctx.volatile:
+            self.write("(escape if context.eval_ctx.autoescape else identity)(")
+        elif frame.eval_ctx.autoescape:
+            self.write("escape(")
+
         if finalize.src is not None:
             self.write(finalize.src)
 
     def _output_child_post(
         self, node: nodes.Expr, frame: Frame, finalize: CodeGenerator._FinalizeInfo
     ) -> None:
+        if frame.eval_ctx.autoescape or frame.eval_ctx.volatile:
+            self.write(")")
+
         if finalize.src is not None:
             self.write(")")
 
@@ -105,7 +170,7 @@ class NativeTemplate(Template):
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment_class.concat(  # type: ignore
+            return self.environment.concat(  # type: ignore
                 self.root_render_func(ctx)
             )
         except Exception:
@@ -120,7 +185,7 @@ class NativeTemplate(Template):
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment_class.concat(  # type: ignore
+            return self.environment.concat(  # type: ignore
                 [n async for n in self.root_render_func(ctx)]  # type: ignore
             )
         except Exception:

@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Native types: a single ``Undefined`` node applies the environment's
+    undefined policy instead of being returned silently. ``Markup`` is
+    preserved when concatenating nodes, and ``autoescape`` escapes values.
+    ``native_concat`` accepts a ``strict`` parameter to raise an error
+    instead of falling back to a string when the result can't be parsed
+    as a Python literal.
 
 
 Version 3.1.6

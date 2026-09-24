@@ -55,6 +55,42 @@ Foo
 >>> print(result.value)
 15
 
+Concatenation Rules
+-------------------+
+
+If rendering produces a single node, its value is returned unchanged,
+preserving its type. If it produces multiple nodes, they are concatenated as
+strings, then parsed with :func:`ast.literal_eval`. If parsing succeeds, the
+parsed value is returned, otherwise the string is returned. Parsing never
+executes code, values that aren't simple literals such as
+``__import__('os')`` are returned as strings.
+
+A single :class:`~jinja2.runtime.Undefined` node follows the environment's
+undefined policy rather than being returned silently. For example,
+``StrictUndefined`` raises an error, while the default ``Undefined`` renders
+an empty string.
+
+If any concatenated node is :class:`markupsafe.Markup`, the result remains
+``Markup`` if it's not parsed as a literal. With ``autoescape`` enabled,
+escaped values are ``Markup`` and keep that type through concatenation.
+
+To fail instead of falling back to a string when the result can't be parsed
+as a literal, use the ``strict`` parameter to
+:func:`~jinja2.nativetypes.native_concat`:
+
+.. code-block:: python
+
+    from functools import partial
+    from jinja2.nativetypes import NativeEnvironment, native_concat
+
+    class StrictNativeEnvironment(NativeEnvironment):
+        concat = staticmethod(partial(native_concat, strict=True))
+
+.. versionchanged:: 3.2
+    A single ``Undefined`` node applies the undefined policy. ``Markup`` is
+    preserved when concatenating. ``autoescape`` escapes values. Added the
+    ``strict`` parameter to ``native_concat``.
+
 Sandboxed Native Environment
 ----------------------------
 
