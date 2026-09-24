@@ -748,14 +748,19 @@ class Macro:
                 caller = self._environment.undefined("No caller defined", name="caller")
             arguments.append(caller)
 
+        # A caller passed to a macro that does not accept one must not leak
+        # into **kwargs. Otherwise it would be forwarded to other macros
+        # called with **kwargs, giving them access to a caller (and the
+        # frame it closes over) from an unrelated call.
+        if "caller" in kwargs:
+            raise TypeError(
+                f"macro {self.name!r} was invoked with two values for the special"
+                " caller argument. This is most likely a bug."
+            )
+
         if self.catch_kwargs:
             arguments.append(kwargs)
         elif kwargs:
-            if "caller" in kwargs:
-                raise TypeError(
-                    f"macro {self.name!r} was invoked with two values for the special"
-                    " caller argument. This is most likely a bug."
-                )
             raise TypeError(
                 f"macro {self.name!r} takes no keyword argument {next(iter(kwargs))!r}"
             )

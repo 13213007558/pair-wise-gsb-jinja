@@ -13,6 +13,13 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   A ``caller`` passed to a macro that does not accept one is no longer
+    leaked into the macro's ``**kwargs``. Previously it could be forwarded
+    to other macros called with ``**kwargs`` (for example in recursive
+    macros), giving them access to a caller object, and the frame it closes
+    over, from an unrelated call. Each macro call now has an independent
+    caller; passing one to a macro that does not accept it raises
+    ``TypeError``.
 
 
 Version 3.1.6
