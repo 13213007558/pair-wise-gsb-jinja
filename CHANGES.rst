@@ -13,6 +13,13 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add an async loader contract. Loaders can implement
+    ``get_source_async``, which is awaited when loading templates for
+    ``include``, ``import``, and ``extends`` during async rendering.
+    Sync loaders keep working in async environments, and sync rendering
+    with an async-only loader raises a clear error. Cancellation while
+    loading closes the unfinished coroutine and does not leave partial
+    entries in the template or bytecode caches.
 
 
 Version 3.1.6

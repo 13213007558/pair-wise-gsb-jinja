@@ -96,7 +96,33 @@ class BaseLoader:
             raise RuntimeError(
                 f"{type(self).__name__} cannot provide access to the source"
             )
+        if type(self).get_source_async is not BaseLoader.get_source_async:
+            raise RuntimeError(
+                f"{type(self).__name__} only implements async loading and"
+                " cannot be used for synchronous rendering. Enable async on"
+                " the environment and use the async rendering API, or"
+                " implement get_source for sync access."
+            )
         raise TemplateNotFound(template)
+
+    async def get_source_async(
+        self, environment: "Environment", template: str
+    ) -> tuple[str, str | None, t.Callable[[], bool] | None]:
+        """Async version of :meth:`get_source`.  Works exactly the same
+        but is called during async template loading, for example when a
+        template uses an include, import, or extends tag during
+        :meth:`Template.render_async`.
+
+        The default implementation delegates to :meth:`get_source`, so
+        loaders that only implement the sync method keep working in
+        async environments.  Loaders that fetch templates from an async
+        resource, such as a network object store, should override this
+        instead.  A loader that only overrides this method cannot be
+        used for synchronous rendering.
+
+        .. versionadded:: 3.2
+        """
+        return self.get_source(environment, template)
 
     def list_templates(self) -> list[str]:
         """Iterates over all templates.  If the loader does not support that
@@ -124,6 +150,63 @@ class BaseLoader:
         # first we try to get the source for this template together
         # with the filename and the uptodate function.
         source, filename, uptodate = self.get_source(environment, name)
+
+        # try to load the code from the bytecode cache if there is a
+        # bytecode cache configured.
+        bcc = environment.bytecode_cache
+        if bcc is not None:
+            bucket = bcc.get_bucket(environment, name, filename, source)
+            code = bucket.code
+
+        # if we don't have code so far (not cached, no longer up to
+        # date) etc. we compile the template
+        if code is None:
+            code = environment.compile(source, name, filename)
+
+        # if the bytecode cache is available and the bucket doesn't
+        # have a code so far, we give the bucket the new code and put
+        # it back to the bytecode cache.
+        if bcc is not None and bucket.code is None:
+            bucket.code = code
+            bcc.set_bucket(bucket)
+
+        return environment.template_class.from_code(
+            environment, code, globals, uptodate
+        )
+
+    @internalcode
+    async def load_async(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        """Async version of :meth:`load`.  Uses :meth:`get_source_async`
+        to fetch the source so that async loaders are awaited rather
+        than called synchronously.  Each call creates and awaits its
+        own coroutine, so concurrent renders never share one.
+
+        If loading is cancelled while reading the source, the
+        unfinished coroutine is closed and nothing is stored in the
+        bytecode cache.
+
+        .. versionadded:: 3.2
+        """
+        code = None
+        if globals is None:
+            globals = {}
+
+        source_coro = self.get_source_async(environment, name)
+
+        try:
+            source, filename, uptodate = await source_coro
+        except BaseException:
+            # The load was cancelled or failed before the source was
+            # read. Close the coroutine in case it did not run to
+            # completion so no pending work or references leak. Closing
+            # an already finished coroutine is a no-op.
+            source_coro.close()
+            raise
 
         # try to load the code from the bytecode cache if there is a
         # bytecode cache configured.
@@ -534,6 +617,17 @@ class PrefixLoader(BaseLoader):
             # (the one that includes the prefix)
             raise TemplateNotFound(template) from e
 
+    async def get_source_async(
+        self, environment: "Environment", template: str
+    ) -> tuple[str, str | None, t.Callable[[], bool] | None]:
+        loader, name = self.get_loader(template)
+        try:
+            return await loader.get_source_async(environment, name)
+        except TemplateNotFound as e:
+            # re-raise the exception with the correct filename here.
+            # (the one that includes the prefix)
+            raise TemplateNotFound(template) from e
+
     @internalcode
     def load(
         self,
@@ -544,6 +638,21 @@ class PrefixLoader(BaseLoader):
         loader, local_name = self.get_loader(name)
         try:
             return loader.load(environment, local_name, globals)
+        except TemplateNotFound as e:
+            # re-raise the exception with the correct filename here.
+            # (the one that includes the prefix)
+            raise TemplateNotFound(name) from e
+
+    @internalcode
+    async def load_async(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        loader, local_name = self.get_loader(name)
+        try:
+            return await loader.load_async(environment, local_name, globals)
         except TemplateNotFound as e:
             # re-raise the exception with the correct filename here.
             # (the one that includes the prefix)
@@ -584,6 +693,16 @@ class ChoiceLoader(BaseLoader):
                 pass
         raise TemplateNotFound(template)
 
+    async def get_source_async(
+        self, environment: "Environment", template: str
+    ) -> tuple[str, str | None, t.Callable[[], bool] | None]:
+        for loader in self.loaders:
+            try:
+                return await loader.get_source_async(environment, template)
+            except TemplateNotFound:
+                pass
+        raise TemplateNotFound(template)
+
     @internalcode
     def load(
         self,
@@ -594,6 +713,20 @@ class ChoiceLoader(BaseLoader):
         for loader in self.loaders:
             try:
                 return loader.load(environment, name, globals)
+            except TemplateNotFound:
+                pass
+        raise TemplateNotFound(name)
+
+    @internalcode
+    async def load_async(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        for loader in self.loaders:
+            try:
+                return await loader.load_async(environment, name, globals)
             except TemplateNotFound:
                 pass
         raise TemplateNotFound(name)
@@ -683,3 +816,14 @@ class ModuleLoader(BaseLoader):
         return environment.template_class.from_module_dict(
             environment, mod.__dict__, globals
         )
+
+    @internalcode
+    async def load_async(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        # Importing the precompiled module is synchronous, delegate to
+        # the sync implementation.
+        return self.load(environment, name, globals)

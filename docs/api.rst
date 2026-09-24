@@ -438,7 +438,16 @@ All loaders are subclasses of :class:`BaseLoader`.  If you want to create your
 own loader, subclass :class:`BaseLoader` and override `get_source`.
 
 .. autoclass:: jinja2.BaseLoader
-    :members: get_source, load
+    :members: get_source, get_source_async, load, load_async
+
+Loaders that fetch templates from an async resource, such as a network
+object store, can override :meth:`~jinja2.BaseLoader.get_source_async`
+instead.  During async rendering, template loading for ``include``,
+``import``, and ``extends`` awaits that method rather than calling the
+sync one.  The default implementation delegates to
+:meth:`~jinja2.BaseLoader.get_source`, so sync loaders keep working in
+async environments.  A loader that only implements the async method
+cannot be used for synchronous rendering and will raise a clear error.
 
 Here a list of the builtin loaders Jinja provides:
 
@@ -530,6 +539,14 @@ function call in a template will automatically await the result. The
 can provide a method that asynchronously loads data from a database, and
 from the template designer's point of view it can be called like any
 other function.
+
+Template loading also supports async loaders.  If the environment's
+loader implements :meth:`~jinja2.BaseLoader.get_source_async`, loading
+caused by ``{% include %}``, ``{% import %}``, and ``{% extends %}``
+during async rendering awaits the loader instead of calling it
+synchronously.  :meth:`Environment.get_template_async` and
+:meth:`Environment.select_template_async` are the async equivalents of
+the sync loading methods.
 
 
 .. _policies:

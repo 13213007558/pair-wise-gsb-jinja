@@ -1016,7 +1016,11 @@ class CodeGenerator(NodeVisitor):
             else:
                 self.outdent()
 
-        self.writeline("parent_template = environment.get_template(", node)
+        self.writeline(
+            f"parent_template = {self.choose_async('await ')}"
+            f"environment.get_template{self.choose_async('_async')}(",
+            node,
+        )
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         self.writeline("for name, parent_block in parent_template.blocks.items():")
@@ -1048,7 +1052,12 @@ class CodeGenerator(NodeVisitor):
         elif isinstance(node.template, (nodes.Tuple, nodes.List)):
             func_name = "select_template"
 
-        self.writeline(f"template = environment.{func_name}(", node)
+        if self.environment.is_async:
+            func_name += "_async"
+
+        self.writeline(
+            f"template = {self.choose_async('await ')}environment.{func_name}(", node
+        )
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         if node.ignore_missing:
@@ -1094,9 +1103,12 @@ class CodeGenerator(NodeVisitor):
     def _import_common(
         self, node: nodes.Import | nodes.FromImport, frame: Frame
     ) -> None:
-        self.write(f"{self.choose_async('await ')}environment.get_template(")
+        if self.environment.is_async:
+            self.write("(await (await environment.get_template_async(")
+        else:
+            self.write("environment.get_template(")
         self.visit(node.template, frame)
-        self.write(f", {self.name!r}).")
+        self.write(f", {self.name!r}){self.choose_async(')')}.")
 
         if node.with_context:
             f_name = f"make_module{self.choose_async('_async')}"
@@ -1105,6 +1117,9 @@ class CodeGenerator(NodeVisitor):
             )
         else:
             self.write(f"_get_default_module{self.choose_async('_async')}(context)")
+
+        if self.environment.is_async:
+            self.write(")")
 
     def visit_Import(self, node: nodes.Import, frame: Frame) -> None:
         """Visit regular imports."""

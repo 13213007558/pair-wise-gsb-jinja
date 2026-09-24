@@ -2,6 +2,7 @@
 options.
 """
 
+import inspect
 import os
 import typing
 import typing as t
@@ -978,6 +979,42 @@ class Environment:
         return template
 
     @internalcode
+    async def _load_template_async(
+        self, name: str, globals: t.MutableMapping[str, t.Any] | None
+    ) -> "Template":
+        if self.loader is None:
+            raise TypeError("no loader for this environment specified")
+        cache_key = (weakref.ref(self.loader), name)
+        if self.cache is not None:
+            template = self.cache.get(cache_key)
+            if template is not None and (
+                not self.auto_reload or template.is_up_to_date
+            ):
+                # template.globals is a ChainMap, modifying it will only
+                # affect the template, not the environment globals.
+                if globals:
+                    template.globals.update(globals)
+
+                return template
+
+        load_coro = self.loader.load_async(self, name, self.make_globals(globals))
+
+        try:
+            template = await load_coro
+        except BaseException:
+            # The load was cancelled or failed. Close the coroutine in
+            # case it did not run to completion, and don't store
+            # anything in the cache. Closing an already finished
+            # coroutine is a no-op.
+            if inspect.iscoroutine(load_coro):
+                load_coro.close()
+            raise
+
+        if self.cache is not None:
+            self.cache[cache_key] = template
+        return template
+
+    @internalcode
     def get_template(
         self,
         name: t.Union[str, "Template"],
@@ -1085,6 +1122,77 @@ class Environment:
         elif isinstance(template_name_or_list, Template):
             return template_name_or_list
         return self.select_template(template_name_or_list, parent, globals)
+
+    @internalcode
+    async def get_template_async(
+        self,
+        name: t.Union[str, "Template"],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        """Async version of :meth:`get_template`.  Uses the loader's
+        async loading API so that async loaders are awaited rather
+        than called synchronously.
+
+        .. versionadded:: 3.2
+        """
+        if isinstance(name, Template):
+            return name
+        if parent is not None:
+            name = self.join_path(name, parent)
+
+        return await self._load_template_async(name, globals)
+
+    @internalcode
+    async def select_template_async(
+        self,
+        names: t.Iterable[t.Union[str, "Template"]],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        """Async version of :meth:`select_template`.  Uses the loader's
+        async loading API so that async loaders are awaited rather
+        than called synchronously.
+
+        .. versionadded:: 3.2
+        """
+        if isinstance(names, Undefined):
+            names._fail_with_undefined_error()
+
+        if not names:
+            raise TemplatesNotFound(
+                message="Tried to select from an empty list of templates."
+            )
+
+        for name in names:
+            if isinstance(name, Template):
+                return name
+            if parent is not None:
+                name = self.join_path(name, parent)
+            try:
+                return await self._load_template_async(name, globals)
+            except (TemplateNotFound, UndefinedError):
+                pass
+        raise TemplatesNotFound(names)  # type: ignore
+
+    @internalcode
+    async def get_or_select_template_async(
+        self,
+        template_name_or_list: t.Union[str, "Template", list[t.Union[str, "Template"]]],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        """Async version of :meth:`get_or_select_template`.  Uses the
+        loader's async loading API so that async loaders are awaited
+        rather than called synchronously.
+
+        .. versionadded:: 3.2
+        """
+        if isinstance(template_name_or_list, (str, Undefined)):
+            return await self.get_template_async(template_name_or_list, parent, globals)
+        elif isinstance(template_name_or_list, Template):
+            return template_name_or_list
+        return await self.select_template_async(template_name_or_list, parent, globals)
 
     def from_string(
         self,
