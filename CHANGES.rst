@@ -10,6 +10,9 @@ Unreleased
 -   Update minimum Babel version to >= 2.17.
 -   Deprecate the ``__version__`` attribute. Use feature detection or
     ``importlib.metadata.version("jinja2")`` instead.
+-   The i18n extension supports named translation domains and selecting
+    a locale for each render without replacing the environment's gettext
+    callables.
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.

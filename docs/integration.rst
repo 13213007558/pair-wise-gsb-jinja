@@ -33,6 +33,13 @@ via a `Babel`_ extractor entry point called
 Gettext messages are extracted from both ``trans`` tags and code
 expressions.
 
+Messages in a ``{% trans domain="..." %}`` block are extracted with
+the corresponding ``dgettext``, ``dngettext``, ``dpgettext``, or
+``dnpgettext`` function name. The domain is the first item in the
+extracted message tuple, followed by any context and the singular and
+plural message texts. These functions are recognized automatically, so
+no extra Babel keywords are required.
+
 To extract gettext messages from templates, the project needs a Jinja
 section in its Babel extraction method `mapping file`_:
 

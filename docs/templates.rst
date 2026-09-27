@@ -1787,6 +1787,31 @@ a string as the first token after ``trans``.
     A context can be passed to the ``trans`` tag to use ``pgettext`` and
     ``npgettext``.
 
+If the application provides more than one translation domain, a block
+can select one with the ``domain`` parameter. The domain must be a
+string literal so that extraction tools can place the message in the
+correct catalog. It applies only to that block; the following block uses
+the application's default domain again.
+
+.. code-block:: jinja
+
+    {% trans %}Open{% endtrans %}
+    {% trans domain="payment" %}Open{% endtrans %}
+    {% trans "action" domain="payment" %}Open{% endtrans %}
+
+Singular, plural, and context-aware messages all use the selected
+domain. If the message is not present there, Jinja follows the domain
+fallback chain configured by the application for the active locale.
+
+When domain-aware catalogs are installed, pass ``locale`` to
+:meth:`Template.render` to select the catalog for that render. The
+choice is part of the render context and is inherited by macros and
+includes that receive the context.
+
+.. code-block:: python
+
+    template.render(locale="zh")
+
 It's possible to translate strings in expressions with these functions:
 
 -   ``_(message)``: Alias for ``gettext``.

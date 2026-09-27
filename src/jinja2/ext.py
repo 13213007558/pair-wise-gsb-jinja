@@ -3,6 +3,7 @@
 import pprint
 import re
 import typing as t
+from collections.abc import Mapping
 
 from markupsafe import Markup
 
@@ -42,14 +43,51 @@ if t.TYPE_CHECKING:
 
 # I18N functions available in Jinja templates. If the I18N library
 # provides ugettext, it will be assigned to gettext.
+DOMAIN_GETTEXT_FUNCTIONS: tuple[str, ...] = (
+    "dgettext",
+    "dngettext",
+    "dpgettext",
+    "dnpgettext",
+)
+
 GETTEXT_FUNCTIONS: tuple[str, ...] = (
     "_",
     "gettext",
     "ngettext",
     "pgettext",
     "npgettext",
+    *DOMAIN_GETTEXT_FUNCTIONS,
 )
 _ws_re = re.compile(r"\s*\n\s*")
+
+_CatalogCallables = dict[str, t.Callable[..., t.Any] | None]
+_Catalogs = dict[tuple[str | None, str], _CatalogCallables]
+_missing = object()
+
+
+class _MappingTranslations:
+    def __init__(self, messages: Mapping[t.Any, str]) -> None:
+        self.messages = messages
+
+    def gettext(self, message: str) -> str:
+        return self.messages.get(message, message)
+
+    def ngettext(self, singular: str, plural: str, n: int) -> str:
+        message = singular if n == 1 else plural
+        return self.messages.get(message, message)
+
+    def pgettext(self, context: str, message: str) -> str:
+        return self.messages.get(
+            (context, message),
+            self.messages.get(f"{context}\x04{message}", message),
+        )
+
+    def npgettext(self, context: str, singular: str, plural: str, n: int) -> str:
+        message = singular if n == 1 else plural
+        return self.messages.get(
+            (context, message),
+            self.messages.get(f"{context}\x04{message}", message),
+        )
 
 
 class Extension:
@@ -241,6 +279,159 @@ def _make_new_npgettext(
     return npgettext
 
 
+def _normalize_locale(locale: t.Any) -> str | None:
+    if locale is None:
+        return None
+
+    return str(locale)
+
+
+def _get_default_domain(environment: Environment) -> str:
+    return str(getattr(environment, "i18n_default_domain", "messages"))
+
+
+def _get_context_locale(context: Context) -> str | None:
+    for key in (
+        "_i18n_locale",
+        "i18n_locale",
+        "_locale",
+        "locale",
+        "LANGUAGE",
+        "language",
+    ):
+        value = context.get(key, _missing)
+
+        if value is not _missing and value is not None:
+            return str(value)
+
+    return _normalize_locale(getattr(context.environment, "i18n_default_locale", None))
+
+
+def _get_domain_chain(environment: Environment, domain: str) -> t.Iterator[str]:
+    fallbacks = t.cast(
+        dict[str, tuple[str, ...]], getattr(environment, "i18n_domain_fallbacks", {})
+    )
+    seen: set[str] = set()
+
+    def visit(current: str) -> t.Iterator[str]:
+        if current in seen:
+            return
+
+        seen.add(current)
+        yield current
+
+        for fallback in fallbacks.get(current, ()):
+            yield from visit(fallback)
+
+    yield from visit(domain)
+
+
+def _get_source_message(func_name: str, args: tuple[t.Any, ...]) -> str:
+    if func_name == "gettext":
+        return t.cast(str, args[0])
+
+    if func_name == "ngettext":
+        return t.cast(str, args[0] if args[2] == 1 else args[1])
+
+    if func_name == "pgettext":
+        return t.cast(str, args[1])
+
+    return t.cast(str, args[1] if args[3] == 1 else args[2])
+
+
+def _format_missing_translation(
+    context: Context,
+    func_name: str,
+    args: tuple[t.Any, ...],
+    variables: dict[str, t.Any],
+) -> str:
+    if variables and not context.environment.newstyle_gettext:  # type: ignore
+        raise TypeError(f"{func_name}() got unexpected keyword arguments")
+
+    rv = _get_source_message(func_name, args)
+
+    if not context.environment.newstyle_gettext:  # type: ignore
+        return rv
+
+    variables = variables.copy()
+
+    if func_name in {"pgettext", "npgettext"}:
+        variables.setdefault("context", args[0])
+
+    if func_name in {"ngettext", "npgettext"}:
+        variables.setdefault("num", args[-1])
+
+    value: str | Markup = rv
+
+    if context.eval_ctx.autoescape:
+        value = Markup(value)
+
+    return value % variables
+
+
+def _translate(
+    context: Context,
+    func_name: str,
+    domain: str | None,
+    args: tuple[t.Any, ...],
+    variables: dict[str, t.Any],
+) -> t.Any:
+    environment = context.environment
+    catalogs = t.cast(_Catalogs, getattr(environment, "i18n_catalogs", {}))
+    locale = _get_context_locale(context)
+    domain = _get_default_domain(environment) if domain is None else str(domain)
+
+    locales = (locale,) if locale is None else (locale, None)
+
+    for current_locale in locales:
+        for current_domain in _get_domain_chain(environment, domain):
+            catalog = catalogs.get((current_locale, current_domain))
+
+            if catalog is None:
+                continue
+
+            func = catalog.get(func_name)
+
+            if func is None:
+                continue
+
+            try:
+                rv = context.call(func, *args, **variables)
+            except KeyError:
+                continue
+
+            missing = _format_missing_translation(context, func_name, args, variables)
+
+            if rv is not None and rv != missing:
+                return rv
+
+    return _format_missing_translation(context, func_name, args, variables)
+
+
+def _make_registry_gettext(func_name: str, has_domain: bool) -> t.Callable[..., t.Any]:
+    @pass_context
+    def registry_gettext(__context: Context, *args: t.Any, **variables: t.Any) -> t.Any:
+        domain = None
+
+        if has_domain:
+            domain = t.cast(str, args[0])
+            args = args[1:]
+
+        return _translate(__context, func_name, domain, args, variables)
+
+    return registry_gettext
+
+
+_registry_gettext = _make_registry_gettext("gettext", False)
+_registry_ngettext = _make_registry_gettext("ngettext", False)
+_registry_pgettext = _make_registry_gettext("pgettext", False)
+_registry_npgettext = _make_registry_gettext("npgettext", False)
+_registry_dgettext = _make_registry_gettext("gettext", True)
+_registry_dngettext = _make_registry_gettext("ngettext", True)
+_registry_dpgettext = _make_registry_gettext("pgettext", True)
+_registry_dnpgettext = _make_registry_gettext("npgettext", True)
+
+
 class InternationalizationExtension(Extension):
     """This extension adds gettext support to Jinja."""
 
@@ -262,28 +453,73 @@ class InternationalizationExtension(Extension):
             install_gettext_callables=self._install_callables,
             uninstall_gettext_translations=self._uninstall,
             extract_translations=self._extract,
+            configure_gettext_domains=self._configure_domains,
             newstyle_gettext=False,
+            i18n_catalogs={},
+            i18n_default_domain="messages",
+            i18n_default_domain_configured=False,
+            i18n_default_locale=None,
+            i18n_domain_fallbacks={},
         )
 
     def _install(
-        self, translations: "_SupportedTranslations", newstyle: bool | None = None
+        self,
+        translations: "_SupportedTranslations | Mapping[t.Any, str]",
+        newstyle: bool | None = None,
+        *,
+        domain: str | None = None,
+        locale: t.Any = None,
+        default_domain: str | None = None,
+        default_locale: t.Any = None,
+        fallback_domains: t.Any = None,
+        fallbacks: t.Any = None,
+        default: bool = False,
     ) -> None:
+        translation_obj: _SupportedTranslations
+
+        if isinstance(translations, Mapping):
+            translation_obj = _MappingTranslations(translations)
+        else:
+            translation_obj = translations
+
         # ugettext and ungettext are preferred in case the I18N library
         # is providing compatibility with older Python versions.
-        gettext = getattr(translations, "ugettext", None)
+        gettext = getattr(translation_obj, "ugettext", None)
         if gettext is None:
-            gettext = translations.gettext
-        ngettext = getattr(translations, "ungettext", None)
+            gettext = translation_obj.gettext
+        ngettext = getattr(translation_obj, "ungettext", None)
         if ngettext is None:
-            ngettext = translations.ngettext
+            ngettext = translation_obj.ngettext
 
-        pgettext = getattr(translations, "pgettext", None)
-        npgettext = getattr(translations, "npgettext", None)
+        pgettext = getattr(translation_obj, "pgettext", None)
+        npgettext = getattr(translation_obj, "npgettext", None)
         self._install_callables(
-            gettext, ngettext, newstyle=newstyle, pgettext=pgettext, npgettext=npgettext
+            gettext,
+            ngettext,
+            newstyle=newstyle,
+            pgettext=pgettext,
+            npgettext=npgettext,
+            domain=domain,
+            locale=locale,
+            default_domain=default_domain,
+            default_locale=default_locale,
+            fallback_domains=fallback_domains,
+            fallbacks=fallbacks,
+            default=default,
         )
 
-    def _install_null(self, newstyle: bool | None = None) -> None:
+    def _install_null(
+        self,
+        newstyle: bool | None = None,
+        *,
+        domain: str | None = None,
+        locale: t.Any = None,
+        default_domain: str | None = None,
+        default_locale: t.Any = None,
+        fallback_domains: t.Any = None,
+        fallbacks: t.Any = None,
+        default: bool = False,
+    ) -> None:
         import gettext
 
         translations = gettext.NullTranslations()
@@ -293,6 +529,99 @@ class InternationalizationExtension(Extension):
             newstyle=newstyle,
             pgettext=translations.pgettext,
             npgettext=translations.npgettext,
+            domain=domain,
+            locale=locale,
+            default_domain=default_domain,
+            default_locale=default_locale,
+            fallback_domains=fallback_domains,
+            fallbacks=fallbacks,
+            default=default,
+        )
+
+    @staticmethod
+    def _fallback_tuple(value: t.Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            return (value,)
+
+        return tuple(str(item) for item in value)
+
+    def _add_domain_fallbacks(self, domain: str, fallbacks: t.Any) -> None:
+        registry = t.cast(
+            dict[str, tuple[str, ...]],
+            self.environment.i18n_domain_fallbacks,  # type: ignore
+        )
+        registry[str(domain)] = self._fallback_tuple(fallbacks)
+
+    def _configure_domains(
+        self,
+        default_domain: str | None = None,
+        fallbacks: t.Any = None,
+        default_locale: t.Any = None,
+        domain_fallbacks: t.Any = None,
+        fallback_domains: t.Any = None,
+    ) -> None:
+        if default_domain is not None:
+            self.environment.i18n_default_domain = str(default_domain)  # type: ignore
+            self.environment.i18n_default_domain_configured = True  # type: ignore
+
+        if default_locale is not None:
+            self.environment.i18n_default_locale = _normalize_locale(default_locale)  # type: ignore
+
+        for config in (fallbacks, domain_fallbacks, fallback_domains):
+            if config is None:
+                continue
+
+            if isinstance(config, Mapping):
+                for domain, fallback_chain in config.items():
+                    self._add_domain_fallbacks(str(domain), fallback_chain)
+            else:
+                self._add_domain_fallbacks(
+                    _get_default_domain(self.environment), config
+                )
+
+    def _prepare_callables(
+        self,
+        gettext: t.Callable[[str], str],
+        ngettext: t.Callable[[str, str, int], str],
+        newstyle: bool | None,
+        pgettext: t.Callable[[str, str], str] | None,
+        npgettext: t.Callable[[str, str, str, int], str] | None,
+    ) -> _CatalogCallables:
+        if newstyle is not None:
+            self.environment.newstyle_gettext = newstyle  # type: ignore
+
+        prepared_gettext: t.Callable[..., t.Any] = gettext
+        prepared_ngettext: t.Callable[..., t.Any] = ngettext
+        prepared_pgettext = pgettext
+        prepared_npgettext = npgettext
+
+        if self.environment.newstyle_gettext:  # type: ignore
+            prepared_gettext = _make_new_gettext(gettext)
+            prepared_ngettext = _make_new_ngettext(ngettext)
+
+            if pgettext is not None:
+                prepared_pgettext = _make_new_pgettext(pgettext)
+
+            if npgettext is not None:
+                prepared_npgettext = _make_new_npgettext(npgettext)
+
+        return {
+            "gettext": prepared_gettext,
+            "ngettext": prepared_ngettext,
+            "pgettext": prepared_pgettext,
+            "npgettext": prepared_npgettext,
+        }
+
+    def _install_registry_callables(self) -> None:
+        self.environment.globals.update(
+            gettext=_registry_gettext,
+            ngettext=_registry_ngettext,
+            pgettext=_registry_pgettext,
+            npgettext=_registry_npgettext,
+            dgettext=_registry_dgettext,
+            dngettext=_registry_dngettext,
+            dpgettext=_registry_dpgettext,
+            dnpgettext=_registry_dnpgettext,
         )
 
     def _install_callables(
@@ -302,25 +631,85 @@ class InternationalizationExtension(Extension):
         newstyle: bool | None = None,
         pgettext: t.Callable[[str, str], str] | None = None,
         npgettext: t.Callable[[str, str, str, int], str] | None = None,
+        *,
+        domain: str | None = None,
+        locale: t.Any = None,
+        default_domain: str | None = None,
+        default_locale: t.Any = None,
+        fallback_domains: t.Any = None,
+        fallbacks: t.Any = None,
+        default: bool = False,
     ) -> None:
-        if newstyle is not None:
-            self.environment.newstyle_gettext = newstyle  # type: ignore
-        if self.environment.newstyle_gettext:  # type: ignore
-            gettext = _make_new_gettext(gettext)
-            ngettext = _make_new_ngettext(ngettext)
-
-            if pgettext is not None:
-                pgettext = _make_new_pgettext(pgettext)
-
-            if npgettext is not None:
-                npgettext = _make_new_npgettext(npgettext)
-
-        self.environment.globals.update(
-            gettext=gettext, ngettext=ngettext, pgettext=pgettext, npgettext=npgettext
+        catalog = self._prepare_callables(
+            gettext, ngettext, newstyle, pgettext, npgettext
+        )
+        domain_aware = (
+            any(
+                value is not None
+                for value in (
+                    domain,
+                    locale,
+                    default_domain,
+                    default_locale,
+                    fallback_domains,
+                    fallbacks,
+                )
+            )
+            or default
         )
 
-    def _uninstall(self, translations: "_SupportedTranslations") -> None:
-        for key in ("gettext", "ngettext", "pgettext", "npgettext"):
+        if not domain_aware:
+            catalogs = t.cast(_Catalogs, self.environment.i18n_catalogs)  # type: ignore
+            catalogs.clear()
+
+            for key in DOMAIN_GETTEXT_FUNCTIONS:
+                self.environment.globals.pop(key, None)
+
+            self.environment.globals.update(catalog)
+            return
+
+        mapping_fallbacks = []
+        local_fallbacks = []
+
+        for config in (fallback_domains, fallbacks):
+            if config is None:
+                continue
+
+            if isinstance(config, Mapping):
+                mapping_fallbacks.append(config)
+            else:
+                local_fallbacks.append(config)
+
+        for config in mapping_fallbacks:
+            self._configure_domains(fallbacks=config)
+
+        self._configure_domains(default_locale=default_locale)
+
+        if default_domain is not None:
+            self._configure_domains(default_domain=default_domain)
+
+        if domain is not None:
+            selected_domain = str(domain)
+        else:
+            selected_domain = _get_default_domain(self.environment)
+
+        if default or (
+            domain is not None and not self.environment.i18n_default_domain_configured  # type: ignore
+        ):
+            self._configure_domains(default_domain=selected_domain)
+
+        for config in local_fallbacks:
+            self._add_domain_fallbacks(selected_domain, config)
+
+        catalogs = t.cast(_Catalogs, self.environment.i18n_catalogs)  # type: ignore
+        catalogs[(_normalize_locale(locale), selected_domain)] = catalog
+        self._install_registry_callables()
+
+    def _uninstall(self, translations: "_SupportedTranslations | None" = None) -> None:
+        catalogs = t.cast(_Catalogs, self.environment.i18n_catalogs)  # type: ignore
+        catalogs.clear()
+
+        for key in GETTEXT_FUNCTIONS[1:]:
             self.environment.globals.pop(key, None)
 
     def _extract(
@@ -337,6 +726,7 @@ class InternationalizationExtension(Extension):
         lineno = next(parser.stream).lineno
 
         context = None
+        domain = None
         context_token = parser.stream.next_if("string")
 
         if context_token is not None:
@@ -353,12 +743,50 @@ class InternationalizationExtension(Extension):
         while parser.stream.current.type != "block_end":
             if variables:
                 parser.stream.expect("comma")
+            else:
+                parser.stream.skip_if("comma")
 
             # skip colon for python compatibility
             if parser.stream.skip_if("colon"):
                 break
 
+            if parser.stream.current.type == "string":
+                if context is not None:
+                    parser.fail(
+                        "translatable context defined twice.",
+                        parser.stream.current.lineno,
+                        exc=TemplateAssertionError,
+                    )
+
+                context = next(parser.stream).value
+                continue
+
             token = parser.stream.expect("name")
+
+            if token.value == "domain" and parser.stream.current.type == "assign":
+                if domain is not None:
+                    parser.fail(
+                        "translation domain defined twice.",
+                        token.lineno,
+                        exc=TemplateAssertionError,
+                    )
+
+                next(parser.stream)
+                domain = parser.stream.expect("string").value
+                continue
+
+            if token.value == "context" and parser.stream.current.type == "assign":
+                if context is not None:
+                    parser.fail(
+                        "translatable context defined twice.",
+                        token.lineno,
+                        exc=TemplateAssertionError,
+                    )
+
+                next(parser.stream)
+                context = parser.stream.expect("string").value
+                continue
+
             if token.value in variables:
                 parser.fail(
                     f"translatable variable {token.value!r} defined twice.",
@@ -443,6 +871,7 @@ class InternationalizationExtension(Extension):
             singular,
             plural,
             context,
+            domain,
             variables,
             plural_expr,
             bool(referenced),
@@ -509,6 +938,7 @@ class InternationalizationExtension(Extension):
         singular: str,
         plural: str | None,
         context: str | None,
+        domain: str | None,
         variables: dict[str, nodes.Expr],
         plural_expr: nodes.Expr | None,
         vars_referenced: bool,
@@ -535,6 +965,10 @@ class InternationalizationExtension(Extension):
         if plural_expr is not None:
             func_name = f"n{func_name}"
             func_args.extend((nodes.Const(plural), plural_expr))
+
+        if domain is not None:
+            func_args.insert(0, nodes.Const(domain))
+            func_name = f"d{func_name}"
 
         node = nodes.Call(nodes.Name(func_name, "load"), func_args, [], None, None)
 
@@ -833,7 +1267,9 @@ def babel_extract(
         return
 
     finder = _CommentFinder(tokens, comment_tags)
-    for lineno, func, message in extract_from_ast(node, keywords):
+    extract_keywords = tuple(dict.fromkeys((*keywords, *DOMAIN_GETTEXT_FUNCTIONS)))
+
+    for lineno, func, message in extract_from_ast(node, extract_keywords):
         yield lineno, func, message, finder.find_comments(lineno)
 
 

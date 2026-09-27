@@ -50,13 +50,21 @@ Environment Methods
 After enabling the extension, the environment provides the following
 additional methods:
 
-.. method:: jinja2.Environment.install_gettext_translations(translations, newstyle=False)
+.. method:: jinja2.Environment.install_gettext_translations(translations, newstyle=False, domain=None, locale=None)
 
     Installs a translation globally for the environment. The
     ``translations`` object must implement ``gettext``, ``ngettext``,
     and optionally ``pgettext`` and ``npgettext``.
     :class:`gettext.NullTranslations`, :class:`gettext.GNUTranslations`,
-    and `Babel`_\s ``Translations`` are supported.
+    and `Babel`_\s ``Translations`` are supported. A mapping of message
+    IDs to translated strings can also be used; context-aware entries
+    may use ``(context, message)`` keys.
+
+    If ``domain`` or ``locale`` is given, the translation is registered
+    in the environment's domain-aware catalog instead of replacing the
+    global gettext callables. Register the same domain once for each
+    supported locale to render one compiled template in different
+    languages.
 
     .. versionchanged:: 3.0
         Added ``pgettext`` and ``npgettext``.
@@ -64,7 +72,7 @@ additional methods:
     .. versionchanged:: 2.5
         Added new-style gettext support.
 
-.. method:: jinja2.Environment.install_null_translations(newstyle=False)
+.. method:: jinja2.Environment.install_null_translations(newstyle=False, domain=None, locale=None)
 
     Install no-op gettext functions. This is useful if you want to
     prepare the application for internationalization but don't want to
@@ -72,12 +80,15 @@ additional methods:
 
     .. versionchanged:: 2.5 Added new-style gettext support.
 
-.. method:: jinja2.Environment.install_gettext_callables(gettext, ngettext, newstyle=False, pgettext=None, npgettext=None)
+.. method:: jinja2.Environment.install_gettext_callables(gettext, ngettext, newstyle=False, pgettext=None, npgettext=None, domain=None, locale=None)
 
     Install the given ``gettext``, ``ngettext``, ``pgettext``, and
     ``npgettext`` callables into the environment. They should behave
     exactly like :func:`gettext.gettext`, :func:`gettext.ngettext`,
     :func:`gettext.pgettext` and :func:`gettext.npgettext`.
+
+    The ``domain`` and ``locale`` parameters have the same meaning as
+    for :meth:`install_gettext_translations`.
 
     If ``newstyle`` is activated, the callables are wrapped to work like
     newstyle callables.  See :ref:`newstyle-gettext` for more information.
@@ -87,6 +98,16 @@ additional methods:
 
     .. versionadded:: 2.5
         Added new-style gettext support.
+
+.. method:: jinja2.Environment.configure_gettext_domains(default_domain=None, fallbacks=None, default_locale=None)
+
+    Configure domain-aware translation lookup. ``default_domain`` is
+    used by ``{% trans %}`` blocks and gettext calls that do not select
+    a domain. ``fallbacks`` is a mapping from a domain to the sequence
+    of domains to try when a message is not found in that domain.
+    Fallback domains are checked only within the active locale; lookup
+    never falls back to a catalog registered for another locale.
+    ``default_locale`` is used when a render does not provide a locale.
 
 .. method:: jinja2.Environment.uninstall_gettext_translations()
 
@@ -106,6 +127,10 @@ additional methods:
     -   ``message`` is the string itself, or a tuple of strings for
         functions with multiple arguments.
 
+    Messages extracted from a block with a domain use one of the
+    ``dgettext`` function names, and the domain is the first item in
+    the message tuple.
+
     If `Babel`_ is installed, see :ref:`babel-integration` to extract
     the strings.
 
@@ -122,6 +147,32 @@ installed when the environment is created.
 
 The ``get_gettext_translations`` function would return the translator
 for the current configuration, for example by using ``gettext.find``.
+
+Applications with multiple translation domains can register each
+translation catalog up front, then select the locale for one render.
+The locale is stored in the render context, so macros and includes that
+receive the context use the same selection without mutating the
+environment between requests.
+
+.. code-block:: python
+
+    env = Environment(extensions=["jinja2.ext.i18n"])
+    env.configure_gettext_domains(
+        default_domain="billing",
+        fallbacks={"payment": ["billing"]},
+    )
+    env.install_gettext_translations(billing_en, domain="billing", locale="en")
+    env.install_gettext_translations(payment_en, domain="payment", locale="en")
+    env.install_gettext_translations(billing_zh, domain="billing", locale="zh")
+    env.install_gettext_translations(payment_zh, domain="payment", locale="zh")
+
+    template = env.get_template("invoice.html")
+    english = template.render(locale="en")
+    chinese = template.render(locale="zh")
+
+If a message is missing from the ``payment`` domain in the active
+locale, the example above looks in ``billing`` for the same locale. It
+does not use an English catalog when rendering Chinese, or vice versa.
 
 The usage of the ``i18n`` extension for template designers is covered in
 :ref:`the template documentation <i18n-in-templates>`.

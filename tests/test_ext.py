@@ -1,8 +1,8 @@
 import re
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import pytest
-
 from jinja2 import DictLoader
 from jinja2 import Environment
 from jinja2 import nodes
@@ -315,6 +315,138 @@ class TestExtensions:
 
 
 class TestInternationalization:
+    def test_trans_domain_and_locale_rendering(self):
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "page": (
+                        "{% macro open_label() %}{% trans %}Open{% endtrans %}"
+                        "{% endmacro %}"
+                        "{% trans %}Open{% endtrans %}|"
+                        '{% trans domain="payment" %}Open{% endtrans %}|'
+                        "{% trans %}Open{% endtrans %}|"
+                        "{{ open_label() }}|"
+                        '{% include "included" %}'
+                    ),
+                    "included": (
+                        "{% trans %}Open{% endtrans %}|"
+                        '{% trans domain="payment" %}Open{% endtrans %}'
+                    ),
+                }
+            ),
+            extensions=["jinja2.ext.i18n"],
+        )
+        env.configure_gettext_domains(default_domain="billing")
+
+        for locale, billing, payment in (
+            ("en", "Open bill", "Pay"),
+            ("zh", "打开账单", "打开支付"),
+        ):
+            env.install_gettext_translations(
+                {"Open": billing}, domain="billing", locale=locale
+            )
+            env.install_gettext_translations(
+                {"Open": payment}, domain="payment", locale=locale
+            )
+
+        template = env.get_template("page")
+        expected = {
+            "en": "Open bill|Pay|Open bill|Open bill|Open bill|Pay",
+            "zh": "打开账单|打开支付|打开账单|打开账单|打开账单|打开支付",
+        }
+
+        assert template.render(locale="en") == expected["en"]
+        assert template.render(locale="zh") == expected["zh"]
+
+        locales = ["en", "zh"] * 4
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rendered = list(
+                executor.map(lambda locale: template.render(locale=locale), locales)
+            )
+
+        assert rendered == [expected[locale] for locale in locales]
+
+    def test_trans_domain_plural_context_and_fallback(self):
+        class Translations:
+            def __init__(self, messages):
+                self.messages = messages
+
+            def gettext(self, message):
+                return self.messages.get(message, message)
+
+            def ngettext(self, singular, plural, n):
+                message = singular if n == 1 else plural
+                return self.messages.get(message, message)
+
+            def pgettext(self, context, message):
+                return self.messages.get((context, message), message)
+
+            def npgettext(self, context, singular, plural, n):
+                message = singular if n == 1 else plural
+                return self.messages.get((context, message), message)
+
+        env = Environment(extensions=["jinja2.ext.i18n"])
+        env.configure_gettext_domains(
+            default_domain="billing", fallbacks={"payment": ["billing"]}
+        )
+        env.install_gettext_translations(
+            Translations(
+                {
+                    ("action", "Open"): "Open bill",
+                    "%(num)s file": "%(num)s bill file",
+                    "%(num)s files": "%(num)s bill files",
+                }
+            ),
+            domain="billing",
+            locale="en",
+            newstyle=True,
+        )
+        env.install_gettext_translations(
+            Translations(
+                {
+                    ("action", "Open"): "打开账单",
+                    "%(num)s file": "%(num)s 个文件",
+                    "%(num)s files": "%(num)s 个文件",
+                }
+            ),
+            domain="billing",
+            locale="zh",
+        )
+        env.install_gettext_translations(
+            Translations({}), domain="payment", locale="zh"
+        )
+
+        template = env.from_string(
+            '{% trans "action" domain="payment" %}Open{% endtrans %}|'
+            '{% trans domain="payment" num=count %}{{ num }} file'
+            "{% pluralize %}{{ num }} files{% endtrans %}"
+        )
+
+        assert template.render(locale="zh", count=1) == "打开账单|1 个文件"
+        assert template.render(locale="zh", count=2) == "打开账单|2 个文件"
+        assert template.render(locale="en", count=2) == "Open bill|2 bill files"
+        assert template.render(locale="fr", count=2) == "Open|2 files"
+
+    def test_extract_domain(self):
+        from jinja2.ext import babel_extract
+
+        source = BytesIO(
+            b'{% trans domain="payment" %}Open{% endtrans %}\n'
+            b'{% trans "action" domain="payment" num=users %}{{ num }} file'
+            b"{% pluralize %}{{ num }} files{% endtrans %}"
+        )
+
+        assert list(babel_extract(source, ("gettext", "ngettext", "_"), [], {})) == [
+            (1, "dgettext", ("payment", "Open"), []),
+            (
+                2,
+                "dnpgettext",
+                ("payment", "action", "%(num)s file", "%(num)s files", None),
+                [],
+            ),
+        ]
+
     def test_trans(self):
         tmpl = i18n_env.get_template("child.html")
         assert tmpl.render(LANGUAGE="de") == "<title>fehlend</title>pass auf"
