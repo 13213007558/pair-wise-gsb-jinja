@@ -917,3 +917,24 @@ returned by the :meth:`Environment.parse` method.
 .. autofunction:: jinja2.meta.find_undeclared_variables
 
 .. autofunction:: jinja2.meta.find_referenced_templates
+
+The Context Analysis API
+------------------------
+
+.. versionadded:: 3.2
+
+The context analysis API statically determines which context values a
+template needs, without rendering it. It distinguishes values that are
+read unconditionally from reads that are protected by a conditional
+check such as `is defined` or the `default` filter, and reports
+accesses that cannot be determined statically.
+
+.. autofunction:: jinja2.context_analysis.analyze_context_requirements
+
+.. autoclass:: jinja2.context_analysis.ContextRequirements
+
+.. autoclass:: jinja2.context_analysis.VariableAccess
+
+.. autoclass:: jinja2.context_analysis.DynamicAccess
+
+.. autoclass:: jinja2.context_analysis.UnresolvedTemplate

@@ -13,6 +13,9 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``jinja2.context_analysis.analyze_context_requirements``, a static
+    analysis API that reports required context paths, conditionally
+    protected paths, and dynamic accesses with source line numbers.
 
 
 Version 3.1.6
