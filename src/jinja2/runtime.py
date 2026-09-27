@@ -672,6 +672,8 @@ class Macro:
         catch_varargs: bool,
         caller: bool,
         default_autoescape: bool | None = None,
+        kwonlyargs: t.Sequence[str] = (),
+        kwonly_defaults: t.Sequence[bool] = (),
     ):
         self._environment = environment
         self._func = func
@@ -682,6 +684,13 @@ class Macro:
         self.catch_varargs = catch_varargs
         self.caller = caller
         self.explicit_caller = "caller" in arguments
+        self.kwonlyargs = tuple(kwonlyargs)
+        self._kwonly_required = frozenset(
+            arg
+            for arg, has_default in zip(kwonlyargs, kwonly_defaults, strict=False)
+            if not has_default
+        )
+        self._param_names = frozenset(arguments) | frozenset(self.kwonlyargs)
 
         if default_autoescape is None:
             if callable(environment.autoescape):
@@ -720,6 +729,28 @@ class Macro:
         arguments = list(args[: self._argument_count])
         off = len(arguments)
 
+        # positional arguments may not cross the '*' separator into
+        # keyword-only parameters, they are only collected as varargs
+        # if the macro catches those.
+        if not self.catch_varargs and len(args) > self._argument_count:
+            extra = len(args) - self._argument_count
+            if extra <= len(self.kwonlyargs):
+                raise TypeError(
+                    f"macro {self.name!r} parameter"
+                    f" {self.kwonlyargs[0]!r} is keyword-only and must"
+                    " be passed by name, not positionally"
+                )
+            if not self.kwonlyargs:
+                raise TypeError(
+                    f"macro {self.name!r} takes not more than"
+                    f" {len(self.arguments)} argument(s)"
+                )
+            raise TypeError(
+                f"macro {self.name!r} takes not more than"
+                f" {len(self.arguments)} positional argument(s)"
+                f" ({len(args)} given)"
+            )
+
         # For information why this is necessary refer to the handling
         # of caller in the `macro_body` handler in the compiler.
         found_caller = False
@@ -739,6 +770,18 @@ class Macro:
         else:
             found_caller = self.explicit_caller
 
+        # keyword-only parameters can only be filled by name.
+        for name in self.kwonlyargs:
+            value = kwargs.pop(name, missing)
+            if value is missing and name in self._kwonly_required:
+                raise TypeError(
+                    f"macro {self.name!r} is missing required keyword-only"
+                    f" argument {name!r}"
+                )
+            if name == "caller":
+                found_caller = True
+            arguments.append(value)
+
         # it's important that the order of these arguments does not change
         # if not also changed in the compiler's `function_scoping` method.
         # the order is caller, keyword arguments, positional arguments!
@@ -749,6 +792,14 @@ class Macro:
             arguments.append(caller)
 
         if self.catch_kwargs:
+            # the automatically provided caller of a call block is not a
+            # user supplied argument and must not be mistaken for one.
+            for kwarg in kwargs:
+                if kwarg != "caller" and kwarg in self._param_names:
+                    raise TypeError(
+                        f"macro {self.name!r} got multiple values for"
+                        f" argument {kwarg!r}"
+                    )
             arguments.append(kwargs)
         elif kwargs:
             if "caller" in kwargs:
@@ -756,16 +807,14 @@ class Macro:
                     f"macro {self.name!r} was invoked with two values for the special"
                     " caller argument. This is most likely a bug."
                 )
-            raise TypeError(
-                f"macro {self.name!r} takes no keyword argument {next(iter(kwargs))!r}"
-            )
+            name = next(iter(kwargs))
+            if name in self._param_names:
+                raise TypeError(
+                    f"macro {self.name!r} got multiple values for argument {name!r}"
+                )
+            raise TypeError(f"macro {self.name!r} takes no keyword argument {name!r}")
         if self.catch_varargs:
             arguments.append(args[self._argument_count :])
-        elif len(args) > self._argument_count:
-            raise TypeError(
-                f"macro {self.name!r} takes not more than"
-                f" {len(self.arguments)} argument(s)"
-            )
 
         return self._invoke(arguments, autoescape)
 

@@ -626,6 +626,15 @@ class CodeGenerator(NodeVisitor):
                 skip_special_params.add(arg.name)
             args.append(frame.symbols.ref(arg.name))
 
+        explicit_caller_kwonly = None
+
+        for idx, arg in enumerate(node.kwonlyargs):
+            if arg.name == "caller":
+                explicit_caller_kwonly = idx
+            if arg.name in ("kwargs", "varargs"):
+                skip_special_params.add(arg.name)
+            args.append(frame.symbols.ref(arg.name))
+
         undeclared = find_undeclared(node.body, ("caller", "kwargs", "varargs"))
 
         if "caller" in undeclared:
@@ -639,6 +648,14 @@ class CodeGenerator(NodeVisitor):
                 try:
                     node.defaults[explicit_caller - len(node.args)]
                 except IndexError:
+                    self.fail(
+                        "When defining macros or call blocks the "
+                        'special "caller" argument must be omitted '
+                        "or be given a default.",
+                        node.lineno,
+                    )
+            elif explicit_caller_kwonly is not None:
+                if node.kw_defaults[explicit_caller_kwonly] is None:
                     self.fail(
                         "When defining macros or call blocks the "
                         'special "caller" argument must be omitted '
@@ -681,6 +698,21 @@ class CodeGenerator(NodeVisitor):
                 self.visit(default, frame)
             self.mark_parameter_stored(ref)
             self.outdent()
+        for idx, arg in enumerate(node.kwonlyargs):
+            ref = frame.symbols.ref(arg.name)
+            self.writeline(f"if {ref} is missing:")
+            self.indent()
+            kw_default = node.kw_defaults[idx]
+            if kw_default is None:
+                self.writeline(
+                    f'{ref} = undefined("parameter {arg.name!r} was not provided",'
+                    f" name={arg.name!r})"
+                )
+            else:
+                self.writeline(f"{ref} = ")
+                self.visit(kw_default, frame)
+            self.mark_parameter_stored(ref)
+            self.outdent()
         self.pop_parameter_definitions()
 
         self.blockvisit(node.body, frame)
@@ -692,14 +724,27 @@ class CodeGenerator(NodeVisitor):
 
     def macro_def(self, macro_ref: MacroRef, frame: Frame) -> None:
         """Dump the macro definition for the def created by macro_body."""
-        arg_tuple = ", ".join(repr(x.name) for x in macro_ref.node.args)
-        name = getattr(macro_ref.node, "name", None)
-        if len(macro_ref.node.args) == 1:
+        node = macro_ref.node
+        arg_tuple = ", ".join(repr(x.name) for x in node.args)
+        name = getattr(node, "name", None)
+        if len(node.args) == 1:
             arg_tuple += ","
+        kwonly_tuple = ""
+        if node.kwonlyargs:
+            kwonly_names = ", ".join(repr(x.name) for x in node.kwonlyargs)
+            if len(node.kwonlyargs) == 1:
+                kwonly_names += ","
+            kwonly_defaults = ", ".join(
+                repr(default is not None) for default in node.kw_defaults
+            )
+            if len(node.kw_defaults) == 1:
+                kwonly_defaults += ","
+            kwonly_tuple = f", ({kwonly_names}), ({kwonly_defaults})"
         self.write(
             f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
             f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
-            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
+            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape"
+            f"{kwonly_tuple})"
         )
 
     def position(self, node: nodes.Node) -> str:

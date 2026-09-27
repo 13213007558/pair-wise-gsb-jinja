@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Macro and call block signatures support a bare ``*`` separator. Parameters
+    after it are keyword-only: they must be passed by name, may have defaults
+    in any order, and are required if they have no default. The names are
+    exposed as ``macro.kwonlyargs``. Passing them positionally, omitting a
+    required one, or assigning a parameter twice raises ``TypeError`` before
+    the macro body runs.
 
 
 Version 3.1.6

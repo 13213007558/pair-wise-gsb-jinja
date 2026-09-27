@@ -904,6 +904,22 @@ The macro can then be called like a function in the namespace::
     <p>{{ input('username') }}</p>
     <p>{{ input('password', type='password') }}</p>
 
+A bare ``*`` in the signature separates positional parameters from
+keyword-only parameters.  Parameters after the ``*`` must be passed by
+name.  Unlike positional parameters, keyword-only parameters may have
+defaults in any order, and a keyword-only parameter without a default is
+required::
+
+    {% macro price(value, *, currency, digits=2) -%}
+        {{ currency }}{{ '%.*f' % (digits, value) }}
+    {%- endmacro %}
+
+    {{ price(3.14159, currency='$') }}
+
+Passing a positional value for a keyword-only parameter, omitting a
+required keyword-only parameter, or passing the same parameter twice all
+raise an error before the macro is called.
+
 If the macro was defined in a different template, you have to
 :ref:`import <import>` it first.
 
@@ -929,6 +945,10 @@ are available on a macro object:
 
 `arguments`
     A tuple of the names of arguments the macro accepts.
+
+`kwonlyargs`
+    A tuple of the names of keyword-only arguments the macro accepts
+    after a bare ``*`` in its signature.
 
 `catch_kwargs`
     This is `true` if the macro accepts extra keyword arguments (i.e.: accesses

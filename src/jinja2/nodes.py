@@ -348,24 +348,36 @@ class Macro(Stmt):
     """A macro definition.  `name` is the name of the macro, `args` a list of
     arguments and `defaults` a list of defaults if there are any.  `body` is
     a list of nodes for the macro body.
+
+    `kwonlyargs` is a list of arguments that appear after a bare ``*`` in
+    the signature and can only be passed by keyword.  `kw_defaults` holds
+    the default for each of those arguments, or `None` if the argument is
+    required.
     """
 
-    fields = ("name", "args", "defaults", "body")
+    fields = ("name", "args", "defaults", "kwonlyargs", "kw_defaults", "body")
     name: str
     args: list["Name"]
     defaults: list["Expr"]
+    kwonlyargs: list["Name"]
+    kw_defaults: list[t.Optional["Expr"]]
     body: list[Node]
 
 
 class CallBlock(Stmt):
     """Like a macro without a name but a call instead.  `call` is called with
     the unnamed macro as `caller` argument this node holds.
+
+    `kwonlyargs` and `kw_defaults` have the same meaning as for
+    :class:`Macro`.
     """
 
-    fields = ("call", "args", "defaults", "body")
+    fields = ("call", "args", "defaults", "kwonlyargs", "kw_defaults", "body")
     call: "Call"
     args: list["Name"]
     defaults: list["Expr"]
+    kwonlyargs: list["Name"]
+    kw_defaults: list[t.Optional["Expr"]]
     body: list[Node]
 
 
