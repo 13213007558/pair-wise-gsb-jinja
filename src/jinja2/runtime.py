@@ -660,7 +660,13 @@ class AsyncLoopContext(LoopContext):
 
 
 class Macro:
-    """Wraps a macro function."""
+    """Wraps a macro function.
+
+    .. attribute:: kwonlyarguments
+
+        A tuple of the names of the keyword-only arguments declared after
+        the bare "*" separator in the macro signature.
+    """
 
     def __init__(
         self,
@@ -672,16 +678,20 @@ class Macro:
         catch_varargs: bool,
         caller: bool,
         default_autoescape: bool | None = None,
+        kwonlyarguments: tuple[str, ...] = (),
+        kwonly_defaults: tuple[bool, ...] = (),
     ):
         self._environment = environment
         self._func = func
         self._argument_count = len(arguments)
         self.name = name
         self.arguments = arguments
+        self.kwonlyarguments = kwonlyarguments
+        self._kwonly_defaults = kwonly_defaults
         self.catch_kwargs = catch_kwargs
         self.catch_varargs = catch_varargs
         self.caller = caller
-        self.explicit_caller = "caller" in arguments
+        self.explicit_caller = "caller" in arguments or "caller" in kwonlyarguments
 
         if default_autoescape is None:
             if callable(environment.autoescape):
@@ -720,6 +730,18 @@ class Macro:
         arguments = list(args[: self._argument_count])
         off = len(arguments)
 
+        # positional arguments may not cross the keyword-only separator
+        if (
+            self.kwonlyarguments
+            and not self.catch_varargs
+            and len(args) > self._argument_count
+        ):
+            raise TypeError(
+                f"macro {self.name!r} parameter"
+                f" {self.kwonlyarguments[0]!r} is keyword-only and cannot"
+                " be passed as a positional argument"
+            )
+
         # For information why this is necessary refer to the handling
         # of caller in the `macro_body` handler in the compiler.
         found_caller = False
@@ -739,6 +761,23 @@ class Macro:
         else:
             found_caller = self.explicit_caller
 
+        # bind the keyword-only arguments declared after the bare "*"
+        # separator in the macro signature.  Required ones must be
+        # provided by name, optional ones fall back to their default
+        # which is evaluated inside the macro body.
+        for idx, name in enumerate(self.kwonlyarguments):
+            try:
+                value = kwargs.pop(name)
+            except KeyError:
+                if not self._kwonly_defaults[idx]:
+                    raise TypeError(
+                        f"macro {self.name!r} requires keyword-only argument {name!r}"
+                    ) from None
+                value = missing
+            if name == "caller":
+                found_caller = True
+            arguments.append(value)
+
         # it's important that the order of these arguments does not change
         # if not also changed in the compiler's `function_scoping` method.
         # the order is caller, keyword arguments, positional arguments!
@@ -756,12 +795,21 @@ class Macro:
                     f"macro {self.name!r} was invoked with two values for the special"
                     " caller argument. This is most likely a bug."
                 )
-            raise TypeError(
-                f"macro {self.name!r} takes no keyword argument {next(iter(kwargs))!r}"
-            )
+            name = next(iter(kwargs))
+            if name in self.arguments or name in self.kwonlyarguments:
+                raise TypeError(
+                    f"macro {self.name!r} got multiple values for argument {name!r}"
+                )
+            raise TypeError(f"macro {self.name!r} takes no keyword argument {name!r}")
         if self.catch_varargs:
             arguments.append(args[self._argument_count :])
         elif len(args) > self._argument_count:
+            if self.kwonlyarguments:
+                raise TypeError(
+                    f"macro {self.name!r} parameter"
+                    f" {self.kwonlyarguments[0]!r} is keyword-only and cannot"
+                    " be passed as a positional argument"
+                )
             raise TypeError(
                 f"macro {self.name!r} takes not more than"
                 f" {len(self.arguments)} argument(s)"

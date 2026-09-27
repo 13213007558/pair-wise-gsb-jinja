@@ -8,6 +8,7 @@ from .exceptions import TemplateAssertionError
 from .exceptions import TemplateSyntaxError
 from .lexer import describe_token
 from .lexer import describe_token_expr
+from .utils import missing
 
 if t.TYPE_CHECKING:
     import typing_extensions as te
@@ -402,14 +403,33 @@ class Parser:
     def parse_signature(self, node: _MacroCall) -> None:
         args = node.args = []
         defaults = node.defaults = []
+        kwonlyargs = node.kwonlyargs = []
+        kw_defaults = node.kw_defaults = []
         self.stream.expect("lparen")
+        seen_kwonly_separator = False
         while self.stream.current.type != "rparen":
-            if args:
+            if args or kwonlyargs or seen_kwonly_separator:
                 self.stream.expect("comma")
+            if self.stream.current.type == "mul":
+                if seen_kwonly_separator:
+                    self.fail("duplicate keyword-only argument separator '*'")
+                seen_kwonly_separator = True
+                next(self.stream)
+                continue
             arg = self.parse_assign_target(name_only=True)
             arg.set_ctx("param")
             if self.stream.skip_if("assign"):
-                defaults.append(self.parse_expression())
+                default: nodes.Expr | None = self.parse_expression()
+            else:
+                default = None
+            if seen_kwonly_separator:
+                kwonlyargs.append(arg)
+                if default is None:
+                    default = nodes.Const(missing, lineno=arg.lineno)
+                kw_defaults.append(default)
+                continue
+            if default is not None:
+                defaults.append(default)
             elif defaults:
                 self.fail("non-default argument follows default argument")
             args.append(arg)
@@ -422,6 +442,8 @@ class Parser:
         else:
             node.args = []
             node.defaults = []
+            node.kwonlyargs = []
+            node.kw_defaults = []
 
         call_node = self.parse_expression()
         if not isinstance(call_node, nodes.Call):

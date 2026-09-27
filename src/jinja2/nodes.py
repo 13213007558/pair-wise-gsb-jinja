@@ -347,13 +347,18 @@ class If(Stmt):
 class Macro(Stmt):
     """A macro definition.  `name` is the name of the macro, `args` a list of
     arguments and `defaults` a list of defaults if there are any.  `body` is
-    a list of nodes for the macro body.
+    a list of nodes for the macro body.  `kwonlyargs` is a list of
+    keyword-only arguments declared after a bare "*" in the signature and
+    `kw_defaults` a list of defaults aligned with it, where entries without
+    a default hold a :class:`Const` node wrapping the "missing" sentinel.
     """
 
-    fields = ("name", "args", "defaults", "body")
+    fields = ("name", "args", "defaults", "kwonlyargs", "kw_defaults", "body")
     name: str
     args: list["Name"]
     defaults: list["Expr"]
+    kwonlyargs: list["Name"]
+    kw_defaults: list["Expr"]
     body: list[Node]
 
 
@@ -362,10 +367,12 @@ class CallBlock(Stmt):
     the unnamed macro as `caller` argument this node holds.
     """
 
-    fields = ("call", "args", "defaults", "body")
+    fields = ("call", "args", "defaults", "kwonlyargs", "kw_defaults", "body")
     call: "Call"
     args: list["Name"]
     defaults: list["Expr"]
+    kwonlyargs: list["Name"]
+    kw_defaults: list["Expr"]
     body: list[Node]
 
 

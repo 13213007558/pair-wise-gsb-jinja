@@ -21,6 +21,7 @@ from .nodes import EvalContext
 from .optimizer import Optimizer
 from .utils import _PassArg
 from .utils import concat
+from .utils import missing
 from .visitor import NodeVisitor
 
 if t.TYPE_CHECKING:
@@ -150,6 +151,13 @@ def find_undeclared(nodes: t.Iterable[nodes.Node], names: t.Iterable[str]) -> se
     except VisitorExit:
         pass
     return visitor.undeclared
+
+
+def _is_missing_default(node: nodes.Expr) -> bool:
+    """Check if a keyword-only argument default is the placeholder that
+    represents "no default given" in a macro signature.
+    """
+    return isinstance(node, nodes.Const) and node.value is missing
 
 
 class MacroRef:
@@ -626,6 +634,15 @@ class CodeGenerator(NodeVisitor):
                 skip_special_params.add(arg.name)
             args.append(frame.symbols.ref(arg.name))
 
+        kwonly_explicit_caller = None
+
+        for idx, arg in enumerate(node.kwonlyargs):
+            if arg.name == "caller":
+                kwonly_explicit_caller = idx
+            if arg.name in ("kwargs", "varargs"):
+                skip_special_params.add(arg.name)
+            args.append(frame.symbols.ref(arg.name))
+
         undeclared = find_undeclared(node.body, ("caller", "kwargs", "varargs"))
 
         if "caller" in undeclared:
@@ -639,6 +656,14 @@ class CodeGenerator(NodeVisitor):
                 try:
                     node.defaults[explicit_caller - len(node.args)]
                 except IndexError:
+                    self.fail(
+                        "When defining macros or call blocks the "
+                        'special "caller" argument must be omitted '
+                        "or be given a default.",
+                        node.lineno,
+                    )
+            elif kwonly_explicit_caller is not None:
+                if _is_missing_default(node.kw_defaults[kwonly_explicit_caller]):
                     self.fail(
                         "When defining macros or call blocks the "
                         'special "caller" argument must be omitted '
@@ -681,6 +706,21 @@ class CodeGenerator(NodeVisitor):
                 self.visit(default, frame)
             self.mark_parameter_stored(ref)
             self.outdent()
+        for idx, arg in enumerate(node.kwonlyargs):
+            ref = frame.symbols.ref(arg.name)
+            self.writeline(f"if {ref} is missing:")
+            self.indent()
+            default = node.kw_defaults[idx]
+            if _is_missing_default(default):
+                self.writeline(
+                    f'{ref} = undefined("parameter {arg.name!r} was not provided",'
+                    f" name={arg.name!r})"
+                )
+            else:
+                self.writeline(f"{ref} = ")
+                self.visit(default, frame)
+            self.mark_parameter_stored(ref)
+            self.outdent()
         self.pop_parameter_definitions()
 
         self.blockvisit(node.body, frame)
@@ -696,10 +736,20 @@ class CodeGenerator(NodeVisitor):
         name = getattr(macro_ref.node, "name", None)
         if len(macro_ref.node.args) == 1:
             arg_tuple += ","
+        kwonly_tuple = ", ".join(repr(x.name) for x in macro_ref.node.kwonlyargs)
+        if len(macro_ref.node.kwonlyargs) == 1:
+            kwonly_tuple += ","
+        kwonly_defaults = ", ".join(
+            "False" if _is_missing_default(x) else "True"
+            for x in macro_ref.node.kw_defaults
+        )
+        if len(macro_ref.node.kw_defaults) == 1:
+            kwonly_defaults += ","
         self.write(
             f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
             f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
-            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
+            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape,"
+            f" ({kwonly_tuple}), ({kwonly_defaults}))"
         )
 
     def position(self, node: nodes.Node) -> str:

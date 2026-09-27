@@ -1,0 +1,15 @@
+{% macro price(value, *, currency, digits=2) -%}
+{{ currency }}{{ '%.*f'|format(digits, value) }}
+{%- endmacro %}
+
+{% macro badge(text, *, label='info') -%}
+[{{ label }}] {{ text }}
+{%- endmacro %}
+
+{% macro panel(*, title='untitled') -%}
+{{ title }}: {{ caller() }}
+{%- endmacro %}
+
+{% macro join_all(*, sep=', ') -%}
+{{ varargs|join(sep) }}{% if kwargs %}|{{ kwargs|sort|join(',') }}{% endif %}
+{%- endmacro %}

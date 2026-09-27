@@ -907,6 +907,19 @@ The macro can then be called like a function in the namespace::
 If the macro was defined in a different template, you have to
 :ref:`import <import>` it first.
 
+A bare ``*`` in the signature separates positional from keyword-only
+arguments, like in Python.  Arguments after the ``*`` must be passed by
+name.  They may have defaults, and required ones may follow optional ones::
+
+    {% macro price(value, *, currency, digits=2) -%}
+        {{ currency }}{{ '%.*f'|format(digits, value) }}
+    {%- endmacro %}
+
+    <p>{{ price(3, currency='USD') }}</p>
+
+Passing a keyword-only argument positionally, omitting a required one, or
+assigning the same argument twice fails before the macro is called.
+
 Inside macros, you have access to three special variables:
 
 `varargs`
@@ -929,6 +942,10 @@ are available on a macro object:
 
 `arguments`
     A tuple of the names of arguments the macro accepts.
+
+`kwonlyarguments`
+    A tuple of the names of keyword-only arguments declared after the bare
+    ``*`` separator in the macro signature.
 
 `catch_kwargs`
     This is `true` if the macro accepts extra keyword arguments (i.e.: accesses

@@ -13,6 +13,9 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Macros support keyword-only arguments after a bare ``*`` in the
+    signature, like Python functions. The names are exposed as
+    ``Macro.kwonlyarguments``.
 
 
 Version 3.1.6
