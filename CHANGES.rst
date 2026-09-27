@@ -13,6 +13,10 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``meta.analyze_context_requirements``, which statically reports
+    the context paths a template requires, the paths protected by
+    conditions, ``is defined``, or ``default``, and any dynamic accesses
+    it cannot resolve, without rendering the template.
 
 
 Version 3.1.6

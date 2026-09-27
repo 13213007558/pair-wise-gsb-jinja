@@ -917,3 +917,11 @@ returned by the :meth:`Environment.parse` method.
 .. autofunction:: jinja2.meta.find_undeclared_variables
 
 .. autofunction:: jinja2.meta.find_referenced_templates
+
+.. autofunction:: jinja2.meta.analyze_context_requirements
+
+.. autoclass:: jinja2.meta.ContextRequirements
+
+.. autoclass:: jinja2.meta.DynamicAccess
+
+.. autoclass:: jinja2.meta.UnresolvedTemplate

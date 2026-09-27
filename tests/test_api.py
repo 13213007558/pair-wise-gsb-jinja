@@ -1,3 +1,4 @@
+import pickle
 import shutil
 import tempfile
 from pathlib import Path
@@ -22,6 +23,10 @@ from jinja2.utils import Cycler
 from jinja2.utils import pass_context
 from jinja2.utils import pass_environment
 from jinja2.utils import pass_eval_context
+
+
+def _explode(value):
+    raise RuntimeError("must not be called")
 
 
 class TestExtendedAPI:
@@ -211,6 +216,134 @@ class TestMeta:
         ast = env.parse('{% include ("foo.html", "bar.html", foo) %}')
         i = meta.find_referenced_templates(ast)
         assert list(i) == ["foo.html", "bar.html", None]
+
+    def test_analyze_context_requirements(self, env):
+        ast = env.parse(
+            '{% macro render(user, pre="") %}{{ pre }}{{ user.id }}{% endmacro %}\n'
+            "{% for item in items %}{{ item.name }} ({{ loop.index }}){% endfor %}\n"
+            "{{ user.id }}\n"
+            "{% if user.nickname is defined %}{{ user.nickname }}{% endif %}\n"
+        )
+        reqs = meta.analyze_context_requirements(ast)
+        # The macro parameter shadows the context variable, the loop
+        # variable and ``loop`` are local, so only these paths remain.
+        assert set(reqs.required) == {("items",), ("user", "id")}
+        assert set(reqs.guarded) == {("user", "nickname")}
+        assert reqs.dynamic == []
+        assert reqs.unresolved_templates == []
+        assert reqs.required[("user", "id")] == 3
+        assert reqs.guarded[("user", "nickname")] == 4
+
+    def test_analyze_context_requirements_control_flow(self, env):
+        ast = env.parse(
+            "{% if a %}{{ b }}{% elif c %}{{ d }}{% else %}{{ e }}{% endif %}"
+            "{{ f or g }}"
+            "{{ h and i }}"
+            "{{ j if k else l }}"
+            '{{ m | default("n/a") }}'
+            "{% if n is not defined %}{{ o }}{% endif %}"
+        )
+        reqs = meta.analyze_context_requirements(ast)
+        assert set(reqs.required) == {("a",), ("f",), ("h",), ("k",)}
+        assert set(reqs.guarded) == {
+            ("b",),
+            ("c",),
+            ("d",),
+            ("e",),
+            ("g",),
+            ("i",),
+            ("j",),
+            ("l",),
+            ("m",),
+            ("n",),
+            ("o",),
+        }
+
+    def test_analyze_context_requirements_required_wins(self, env):
+        ast = env.parse("{% if x %}{{ user.id }}{% endif %}{{ user.id }}")
+        reqs = meta.analyze_context_requirements(ast)
+        assert set(reqs.required) == {("x",), ("user", "id")}
+        assert reqs.guarded == {}
+
+    def test_analyze_context_requirements_scopes(self, env):
+        ast = env.parse(
+            "{% set x = user.id %}{{ x }}"
+            "{% with y = user.name %}{{ y }}{% endwith %}{{ y }}"
+            "{% macro m(user) %}{{ user.email }}{% endmacro %}{{ m }}"
+            "{% for a, b in pairs %}{{ a }}{{ b }}{% endfor %}"
+            "{% import 'forms.html' as forms %}{{ forms.render() }}"
+        )
+        reqs = meta.analyze_context_requirements(ast)
+        assert set(reqs.required) == {
+            ("user", "id"),
+            ("user", "name"),
+            ("y",),
+            ("pairs",),
+        }
+        assert reqs.guarded == {}
+
+    def test_analyze_context_requirements_dynamic(self, env):
+        ast = env.parse(
+            "{{ user[key] }}" "{% for item in items %}{{ item[label] }}{% endfor %}"
+        )
+        reqs = meta.analyze_context_requirements(ast)
+        assert set(reqs.required) == {("user",), ("key",), ("items",), ("label",)}
+        # Only the access rooted at a context name is reported, the
+        # subscript on the local loop variable is not.
+        assert reqs.dynamic == [
+            meta.DynamicAccess(parts=("user",), lineno=1, reason="dynamic subscript")
+        ]
+
+    def test_analyze_context_requirements_templates(self, env):
+        child = env.parse("{{ shared.value }}")
+        base = env.parse("{{ base_value }}")
+        macros = env.parse("{% macro f() %}{{ dep.value }}{% endmacro %}")
+        ast = env.parse(
+            '{% extends "base.html" %}\n'
+            '{% include "child.html" %}\n'
+            '{% include ["child.html", dynamic] %}\n'
+            "{% include other %}\n"
+            '{% import "macros.html" as m with context %}{{ m.f() }}\n'
+            '{% include "missing.html" %}\n'
+        )
+        reqs = meta.analyze_context_requirements(
+            ast,
+            {
+                "child.html": child,
+                "base.html": base,
+                "macros.html": macros,
+            },
+        )
+        assert set(reqs.required) == {
+            ("shared", "value"),
+            ("base_value",),
+            ("dynamic",),
+            ("other",),
+            ("dep", "value"),
+        }
+        assert reqs.unresolved_templates == [
+            meta.UnresolvedTemplate(name=None, lineno=3, kind="include"),
+            meta.UnresolvedTemplate(name=None, lineno=4, kind="include"),
+            meta.UnresolvedTemplate(name="missing.html", lineno=6, kind="include"),
+        ]
+
+    def test_analyze_context_requirements_no_side_effects(self, env):
+        env.filters["explode_filter"] = _explode
+        env.tests["explode_test"] = _explode
+        source = (
+            "{{ value | explode_filter }}" "{% if value is explode_test %}x{% endif %}"
+        )
+        ast = env.parse(source)
+        before_ast = pickle.dumps(ast)
+        before_globals = dict(env.globals)
+        reqs = meta.analyze_context_requirements(ast)
+        assert set(reqs.required) == {("value",)}
+        assert pickle.dumps(ast) == before_ast
+        assert env.globals == before_globals
+        # The template still renders afterwards.
+        env.filters["explode_filter"] = str
+        env.tests["explode_test"] = lambda value: True
+        assert env.from_string(source).render(value=1) == "1x"
 
 
 class TestStreaming:
