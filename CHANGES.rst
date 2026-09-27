@@ -14,6 +14,22 @@ Unreleased
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
 
+-   The i18n extension supports translation domains. The application
+    installs catalogs for each domain and locale once with
+    ``install_translation_domains``, a ``{% trans %}`` block selects a
+    catalog with ``domain="..."``, and messages that are not found
+    follow the configured per-domain fallback chain without mixing
+    locales.
+-   ``Template.render`` and ``generate`` accept a ``locale`` parameter,
+    and the i18n extension adds an ``Environment.use_locale`` context
+    manager, to select the locale per render instead of reinstalling
+    gettext functions on the environment for each request. Concurrent
+    renders can use different locales.
+-   Babel extraction recognizes the domain-aware ``dgettext``,
+    ``dngettext``, ``dpgettext``, and ``dnpgettext`` functions,
+    preserving the domain, context, singular and plural text, and
+    placeholders of each message.
+
 
 Version 3.1.6
 -------------

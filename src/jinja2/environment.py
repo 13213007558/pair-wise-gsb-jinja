@@ -46,6 +46,7 @@ from .nodes import EvalContext
 from .parser import Parser
 from .runtime import Context
 from .runtime import new_context
+from .runtime import render_locale
 from .runtime import Undefined
 from .utils import _PassArg
 from .utils import concat
@@ -1269,7 +1270,9 @@ class Template:
 
         return t
 
-    def render(self, *args: t.Any, **kwargs: t.Any) -> str:
+    def render(
+        self, *args: t.Any, locale: str | None = None, **kwargs: t.Any
+    ) -> str:
         """This method accepts the same arguments as the `dict` constructor:
         A dict, a dict subclass or some keyword arguments.  If no arguments
         are given the context will be empty.  These two calls do the same::
@@ -1278,20 +1281,36 @@ class Template:
             template.render({'knights': 'that say nih'})
 
         This will return the rendered template as a string.
+
+        .. versionchanged:: 3.2
+            The `locale` parameter was added.  If the i18n extension is
+            set up with translation domains, this selects the locale used
+            to look up translations for this render only, without changing
+            any shared state on the environment.
         """
         if self.environment.is_async:
             import asyncio
 
-            return asyncio.run(self.render_async(*args, **kwargs))
+            return asyncio.run(self.render_async(*args, locale=locale, **kwargs))
 
         ctx = self.new_context(dict(*args, **kwargs))
+
+        if locale is None:
+            locale_token = None
+        else:
+            locale_token = render_locale.set(locale)
 
         try:
             return self.environment.concat(self.root_render_func(ctx))  # type: ignore
         except Exception:
             self.environment.handle_exception()
+        finally:
+            if locale_token is not None:
+                render_locale.reset(locale_token)
 
-    async def render_async(self, *args: t.Any, **kwargs: t.Any) -> str:
+    async def render_async(
+        self, *args: t.Any, locale: str | None = None, **kwargs: t.Any
+    ) -> str:
         """This works similar to :meth:`render` but returns a coroutine
         that when awaited returns the entire rendered template string.  This
         requires the async feature to be enabled.
@@ -1307,12 +1326,20 @@ class Template:
 
         ctx = self.new_context(dict(*args, **kwargs))
 
+        if locale is None:
+            locale_token = None
+        else:
+            locale_token = render_locale.set(locale)
+
         try:
             return self.environment.concat(  # type: ignore
                 [n async for n in self.root_render_func(ctx)]  # type: ignore
             )
         except Exception:
             return self.environment.handle_exception()
+        finally:
+            if locale_token is not None:
+                render_locale.reset(locale_token)
 
     def stream(self, *args: t.Any, **kwargs: t.Any) -> "TemplateStream":
         """Works exactly like :meth:`generate` but returns a
@@ -1320,32 +1347,47 @@ class Template:
         """
         return TemplateStream(self.generate(*args, **kwargs))
 
-    def generate(self, *args: t.Any, **kwargs: t.Any) -> t.Iterator[str]:
+    def generate(
+        self, *args: t.Any, locale: str | None = None, **kwargs: t.Any
+    ) -> t.Iterator[str]:
         """For very large templates it can be useful to not render the whole
         template at once but evaluate each statement after another and yield
         piece for piece.  This method basically does exactly that and returns
         a generator that yields one item after another as strings.
 
         It accepts the same arguments as :meth:`render`.
+
+        .. versionchanged:: 3.2
+            The `locale` parameter was added, see :meth:`render`.
         """
         if self.environment.is_async:
             import asyncio
 
             async def to_list() -> list[str]:
-                return [x async for x in self.generate_async(*args, **kwargs)]
+                return [
+                    x async for x in self.generate_async(*args, locale=locale, **kwargs)
+                ]
 
             yield from asyncio.run(to_list())
             return
 
         ctx = self.new_context(dict(*args, **kwargs))
 
+        if locale is None:
+            locale_token = None
+        else:
+            locale_token = render_locale.set(locale)
+
         try:
             yield from self.root_render_func(ctx)
         except Exception:
             yield self.environment.handle_exception()
+        finally:
+            if locale_token is not None:
+                render_locale.reset(locale_token)
 
     async def generate_async(
-        self, *args: t.Any, **kwargs: t.Any
+        self, *args: t.Any, locale: str | None = None, **kwargs: t.Any
     ) -> t.AsyncGenerator[str, object]:
         """An async version of :meth:`generate`.  Works very similarly but
         returns an async iterator instead.
@@ -1357,6 +1399,11 @@ class Template:
 
         ctx = self.new_context(dict(*args, **kwargs))
 
+        if locale is None:
+            locale_token = None
+        else:
+            locale_token = render_locale.set(locale)
+
         try:
             agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
 
@@ -1365,6 +1412,9 @@ class Template:
                     yield event
         except Exception:
             yield self.environment.handle_exception()
+        finally:
+            if locale_token is not None:
+                render_locale.reset(locale_token)
 
     def new_context(
         self,

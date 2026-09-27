@@ -1,4 +1,6 @@
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import pytest
@@ -9,6 +11,7 @@ from jinja2 import nodes
 from jinja2 import pass_context
 from jinja2 import TemplateSyntaxError
 from jinja2.exceptions import TemplateAssertionError
+from jinja2.exceptions import TemplateRuntimeError
 from jinja2.ext import Extension
 from jinja2.lexer import count_newlines
 from jinja2.lexer import Token
@@ -480,6 +483,312 @@ class TestInternationalization:
         with pytest.raises(TemplateSyntaxError) as excinfo:
             i18n_env.from_string(s)
         assert "saw `wibble`" in str(excinfo.value)
+
+
+class DictTranslations:
+    """Minimal in-memory translations object for the domain tests.  The
+    catalog maps a msgid to a translation, or to a ``(singular, plural)``
+    tuple for pluralizable messages.  Context messages use the gettext
+    ``context\\x04msgid`` key convention.
+    """
+
+    def __init__(self, catalog):
+        self._catalog = catalog
+
+    def gettext(self, message):
+        rv = self._catalog.get(message, message)
+
+        if isinstance(rv, tuple):
+            return rv[0]
+
+        return rv
+
+    def ngettext(self, singular, plural, n):
+        rv = self._catalog.get(singular)
+
+        if rv is None:
+            return singular if n == 1 else plural
+
+        return rv[0] if n == 1 else rv[1]
+
+    def pgettext(self, context, message):
+        rv = self._catalog.get(f"{context}\x04{message}", message)
+
+        if isinstance(rv, tuple):
+            return rv[0]
+
+        return rv
+
+    def npgettext(self, context, singular, plural, n):
+        rv = self._catalog.get(f"{context}\x04{singular}")
+
+        if rv is None:
+            return singular if n == 1 else plural
+
+        return rv[0] if n == 1 else rv[1]
+
+
+def make_domain_env(**kwargs):
+    """An i18n environment with two domains that both translate the
+    msgid ``Open`` differently.  ``payment`` falls back to ``billing``
+    for messages it doesn't have.
+    """
+    env = Environment(extensions=["jinja2.ext.i18n"])
+    env.install_translation_domains(
+        {
+            "billing": {
+                "en": DictTranslations({"Open": "Open invoice", "Cancel": "Cancel"}),
+                "zh": DictTranslations({"Open": "打开账单", "Cancel": "取消"}),
+            },
+            "payment": {
+                "en": DictTranslations(
+                    {
+                        "Open": "Open payment",
+                        "%(num)s file": ("%(num)s file", "%(num)s files"),
+                        "button\x04Open": "Open it",
+                        "button\x04%(num)s file": (
+                            "%(num)s document",
+                            "%(num)s documents",
+                        ),
+                    }
+                ),
+                "zh": DictTranslations(
+                    {
+                        "Open": "发起支付",
+                        "%(num)s file": ("%(num)s 个文件", "%(num)s 个文件"),
+                        "button\x04Open": "开启",
+                        "button\x04%(num)s file": (
+                            "%(num)s 份文档",
+                            "%(num)s 份文档",
+                        ),
+                    }
+                ),
+            },
+        },
+        default_domain="billing",
+        fallback={"payment": ["billing"]},
+        **kwargs,
+    )
+    return env
+
+
+class TestTranslationDomains:
+    def test_domain_selection(self):
+        env = make_domain_env()
+        tmpl = env.from_string(
+            "{% trans domain='billing' %}Open{% endtrans %}"
+            "|{% trans domain='payment' %}Open{% endtrans %}"
+        )
+        assert tmpl.render(locale="en") == "Open invoice|Open payment"
+        assert tmpl.render(locale="zh") == "打开账单|发起支付"
+
+    def test_default_domain(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans %}Open{% endtrans %}")
+        assert tmpl.render(locale="en") == "Open invoice"
+        assert tmpl.render(locale="zh") == "打开账单"
+
+    def test_domain_scoped_to_block(self):
+        env = make_domain_env()
+        tmpl = env.from_string(
+            "{% trans domain='payment' %}Open{% endtrans %}"
+            "|{% trans %}Open{% endtrans %}"
+        )
+        # the explicit domain only applies to its own block, the next
+        # block uses the default domain again
+        assert tmpl.render(locale="zh") == "发起支付|打开账单"
+
+    def test_domain_plural(self):
+        env = make_domain_env()
+        tmpl = env.from_string(
+            "{% trans domain='payment', num=count %}{{ num }} file"
+            "{% pluralize %}{{ num }} files{% endtrans %}"
+        )
+        assert tmpl.render(count=1, locale="en") == "1 file"
+        assert tmpl.render(count=2, locale="en") == "2 files"
+        assert tmpl.render(count=1, locale="zh") == "1 个文件"
+        assert tmpl.render(count=2, locale="zh") == "2 个文件"
+
+    def test_domain_context(self):
+        env = make_domain_env()
+        tmpl = env.from_string(
+            "{% trans 'button' domain='payment' %}Open{% endtrans %}"
+        )
+        assert tmpl.render(locale="en") == "Open it"
+        assert tmpl.render(locale="zh") == "开启"
+
+    def test_domain_context_plural(self):
+        env = make_domain_env()
+        tmpl = env.from_string(
+            "{% trans 'button' domain='payment', num=count %}{{ num }} file"
+            "{% pluralize %}{{ num }} files{% endtrans %}"
+        )
+        assert tmpl.render(count=1, locale="en") == "1 document"
+        assert tmpl.render(count=2, locale="en") == "2 documents"
+        assert tmpl.render(count=2, locale="zh") == "2 份文档"
+
+    def test_domain_fallback_chain(self):
+        env = make_domain_env()
+        # "Cancel" only exists in the billing catalog, payment falls
+        # back to it as configured
+        tmpl = env.from_string("{% trans domain='payment' %}Cancel{% endtrans %}")
+        assert tmpl.render(locale="en") == "Cancel"
+        assert tmpl.render(locale="zh") == "取消"
+
+    def test_no_cross_locale_fallback(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+        # no fr catalogs at all, the msgid is used rather than picking
+        # up a translation from another locale
+        assert tmpl.render(locale="fr") == "Open"
+
+    def test_no_cross_locale_fallback_missing_message(self):
+        env = make_domain_env()
+        env.i18n_domains.translations["billing"]["en"] = DictTranslations(
+            {"Close": "Close it"}
+        )
+        tmpl = env.from_string("{% trans %}Close{% endtrans %}")
+        # the zh catalog doesn't have the message, the msgid is used
+        # rather than the English translation
+        assert tmpl.render(locale="zh") == "Close"
+        assert tmpl.render(locale="en") == "Close it"
+
+    def test_render_locale_interleaved(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+        out = [tmpl.render(locale=locale) for locale in ("en", "zh", "en", "zh")]
+        assert out == ["Open payment", "发起支付", "Open payment", "发起支付"]
+        # a render without a locale uses the default locale
+        assert tmpl.render() == "Open payment"
+
+    def test_use_locale_context_manager(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+
+        with env.use_locale("zh"):
+            assert tmpl.render() == "发起支付"
+
+        # the selection is restored after the block
+        assert tmpl.render() == "Open payment"
+
+    def test_render_locale_beats_use_locale(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+
+        with env.use_locale("zh"):
+            assert tmpl.render(locale="en") == "Open payment"
+
+    def test_concurrent_render_locale(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+        barrier = threading.Barrier(8)
+
+        def work(locale):
+            barrier.wait()
+            return {tmpl.render(locale=locale) for _ in range(50)}
+
+        with ThreadPoolExecutor(8) as pool:
+            futures = [
+                pool.submit(work, "en" if i % 2 else "zh") for i in range(8)
+            ]
+            results = [f.result() for f in futures]
+
+        for i, result in enumerate(results):
+            assert result == {"Open payment" if i % 2 else "发起支付"}
+
+    def test_macro_and_include_inherit_locale(self):
+        env = Environment(
+            loader=DictLoader(
+                {
+                    "macros.html": "{% macro pay() %}"
+                    "{% trans domain='payment' %}Open{% endtrans %}{% endmacro %}",
+                    "body.html": "{% trans domain='payment' %}Open{% endtrans %}",
+                    "page.html": "{% from 'macros.html' import pay %}"
+                    "{{ pay() }}|{% include 'body.html' %}",
+                }
+            ),
+            extensions=["jinja2.ext.i18n"],
+        )
+        env.install_translation_domains(
+            {"payment": {"zh": DictTranslations({"Open": "发起支付"})}},
+            default_domain="payment",
+        )
+        tmpl = env.get_template("page.html")
+        assert tmpl.render(locale="zh") == "发起支付|发起支付"
+        assert tmpl.render(locale="en") == "Open|Open"
+
+    def test_dynamic_domain(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain=d %}Open{% endtrans %}")
+        assert tmpl.render(d="payment", locale="zh") == "发起支付"
+        assert tmpl.render(d="billing", locale="zh") == "打开账单"
+
+    def test_domain_without_registry(self):
+        env = Environment(extensions=["jinja2.ext.i18n"])
+        env.install_null_translations()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+
+        with pytest.raises(TemplateRuntimeError, match="install_translation_domains"):
+            tmpl.render()
+
+    def test_domain_defined_twice(self):
+        env = make_domain_env()
+
+        with pytest.raises(TemplateSyntaxError, match="domain defined twice"):
+            env.from_string("{% trans domain='a', domain='b' %}Open{% endtrans %}")
+
+    def test_generate_locale(self):
+        env = make_domain_env()
+        tmpl = env.from_string("{% trans domain='payment' %}Open{% endtrans %}")
+        assert "".join(tmpl.generate(locale="zh")) == "发起支付"
+
+    def test_newstyle_domain(self):
+        env = Environment(extensions=["jinja2.ext.i18n"], autoescape=True)
+        env.install_translation_domains(
+            {
+                "payment": {
+                    "zh": DictTranslations({"%(name)s files": "%(name)s 个文件"})
+                }
+            },
+            default_domain="payment",
+            newstyle=True,
+        )
+        tmpl = env.from_string(
+            "{% trans domain='payment', name=user %}{{ name }} files{% endtrans %}"
+        )
+        # newstyle formatting escapes the variable for autoescape
+        assert tmpl.render(user="<", locale="zh") == "&lt; 个文件"
+
+    def test_extract_domain(self):
+        env = make_domain_env()
+        source = (
+            "{% trans domain='payment' %}Open{% endtrans %}\n"
+            "{% trans 'button' domain='payment' %}Open{% endtrans %}\n"
+            "{% trans domain='payment', num=users %}{{ num }} file"
+            "{% pluralize %}{{ num }} files{% endtrans %}"
+        )
+        assert list(env.extract_translations(source)) == [
+            (1, "dgettext", ("payment", "Open")),
+            (2, "dpgettext", ("payment", "button", "Open")),
+            (3, "dngettext", ("payment", "%(num)s file", "%(num)s files", None)),
+        ]
+
+    def test_babel_extract_domain(self):
+        from jinja2.ext import babel_extract
+        from jinja2.ext import GETTEXT_FUNCTIONS
+
+        source = BytesIO(
+            b"\n"
+            b"{% trans domain='payment' %}Open{% endtrans %}\n"
+            b"{% trans 'button' domain='payment' %}Open{% endtrans %}\n"
+            b"{% trans domain='payment', num=users %}{{ num }} file"
+            b"{% pluralize %}{{ num }} files{% endtrans %}\n"
+        )
+        assert list(babel_extract(source, GETTEXT_FUNCTIONS, [], {})) == [
+            (2, "dgettext", ("payment", "Open"), []),
+            (3, "dpgettext", ("payment", "button", "Open"), []),
+            (4, "dngettext", ("payment", "%(num)s file", "%(num)s files", None), []),
+        ]
 
 
 class TestScope:

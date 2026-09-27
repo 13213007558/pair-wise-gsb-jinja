@@ -1787,6 +1787,24 @@ a string as the first token after ``trans``.
     A context can be passed to the ``trans`` tag to use ``pgettext`` and
     ``npgettext``.
 
+If the application installed multiple translation domains with
+``Environment.install_translation_domains``, a ``trans`` block selects
+the catalog to look up with the ``domain`` parameter.  Blocks without a
+``domain`` use the application's default domain.  The domain only
+applies to its own block, the next block uses the default domain again.
+
+.. code-block:: jinja
+
+    {% trans domain="payment" %}Open{% endtrans %}
+    {% trans "button" domain="payment", count=payments|length %}
+        1 payment
+    {%- pluralize -%}
+        {{ count }} payments
+    {%- endtrans %}
+
+.. versionadded:: 3.2
+    The ``domain`` parameter was added to the ``trans`` tag.
+
 It's possible to translate strings in expressions with these functions:
 
 -   ``_(message)``: Alias for ``gettext``.
@@ -1797,6 +1815,12 @@ It's possible to translate strings in expressions with these functions:
     translation based on the context string.
 -   ``npgettext(context, singular, plural, n)``: Like ``npgettext()``,
     but picks the translation based on the context string.
+
+If translation domains are installed, each of these also has a variant
+that takes the domain as the first argument: ``dgettext(domain,
+message)``, ``dngettext(domain, singular, plural, n)``,
+``dpgettext(domain, context, message)``, and ``dnpgettext(domain,
+context, singular, plural, n)``.
 
 You can print a translated string like this:
 

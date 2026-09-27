@@ -126,6 +126,62 @@ for the current configuration, for example by using ``gettext.find``.
 The usage of the ``i18n`` extension for template designers is covered in
 :ref:`the template documentation <i18n-in-templates>`.
 
+.. method:: jinja2.Environment.install_translation_domains(translations, default_domain="messages", default_locale="en", fallback=None, newstyle=False)
+
+    Installs translation catalogs for multiple domains and locales.
+    ``translations`` maps each domain name to a mapping of locale name
+    to a translations object, for example ``{"billing": {"en": ...,
+    "zh": ...}}``.  The application passes the catalogs in, templates
+    never read files or import modules to find translations.
+
+    A ``{% trans %}`` block selects a catalog with ``domain="..."``,
+    blocks without one use ``default_domain``.  Singular, plural, and
+    context messages are all looked up in the selected domain.  If a
+    message is not found, the domains in the ``fallback`` chain for the
+    selected domain are consulted in order.  Fallback only considers
+    catalogs for the active locale, it never mixes languages.
+
+    The locale is selected per render, so a single compiled template
+    can render different languages concurrently without reinstalling
+    anything on the environment.  Macros and includes inherit the
+    selection of the render they are part of.
+
+    .. code-block:: python
+
+        env.install_translation_domains(
+            {
+                "billing": {"en": billing_en, "zh": billing_zh},
+                "payment": {"en": payment_en, "zh": payment_zh},
+            },
+            default_domain="billing",
+            fallback={"payment": ["billing"]},
+        )
+
+        template.render(locale="zh")
+
+        # or select the locale for a block of renders
+        with env.use_locale("zh"):
+            template.render()
+
+    The domain-aware variants ``dgettext``, ``dngettext``, ``dpgettext``,
+    and ``dnpgettext`` are installed as globals as well, and are included
+    in :func:`~jinja2.ext.GETTEXT_FUNCTIONS`, so extraction with Babel
+    preserves the domain along with the context, singular and plural
+    text, and placeholders of each message.
+
+    .. versionadded:: 3.2
+
+.. method:: jinja2.Environment.use_locale(locale)
+
+    A context manager that selects the locale used to look up
+    translations for all renders that happen inside the ``with`` block.
+    The selection is local to the current thread or async task, so
+    concurrent renders can use different locales.  To select a locale
+    for a single render, pass ``locale`` to
+    :meth:`~jinja2.Template.render` instead.
+
+    .. versionadded:: 3.2
+
 .. _gettext: https://docs.python.org/3/library/gettext.html
 .. _Babel: https://babel.pocoo.org/
 

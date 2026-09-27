@@ -11,6 +11,7 @@ from .compiler import Frame
 from .compiler import has_safe_repr
 from .environment import Environment
 from .environment import Template
+from .runtime import render_locale
 
 
 def native_concat(values: t.Iterable[t.Any]) -> t.Any | None:
@@ -95,7 +96,9 @@ class NativeEnvironment(Environment):
 class NativeTemplate(Template):
     environment_class = NativeEnvironment
 
-    def render(self, *args: t.Any, **kwargs: t.Any) -> t.Any:
+    def render(
+        self, *args: t.Any, locale: str | None = None, **kwargs: t.Any
+    ) -> t.Any:
         """Render the template to produce a native Python type. If the
         result is a single node, its value is returned. Otherwise, the
         nodes are concatenated as strings. If the result can be parsed
@@ -104,14 +107,24 @@ class NativeTemplate(Template):
         """
         ctx = self.new_context(dict(*args, **kwargs))
 
+        if locale is None:
+            locale_token = None
+        else:
+            locale_token = render_locale.set(locale)
+
         try:
             return self.environment_class.concat(  # type: ignore
                 self.root_render_func(ctx)
             )
         except Exception:
             return self.environment.handle_exception()
+        finally:
+            if locale_token is not None:
+                render_locale.reset(locale_token)
 
-    async def render_async(self, *args: t.Any, **kwargs: t.Any) -> t.Any:
+    async def render_async(
+        self, *args: t.Any, locale: str | None = None, **kwargs: t.Any
+    ) -> t.Any:
         if not self.environment.is_async:
             raise RuntimeError(
                 "The environment was not created with async mode enabled."
@@ -119,12 +132,20 @@ class NativeTemplate(Template):
 
         ctx = self.new_context(dict(*args, **kwargs))
 
+        if locale is None:
+            locale_token = None
+        else:
+            locale_token = render_locale.set(locale)
+
         try:
             return self.environment_class.concat(  # type: ignore
                 [n async for n in self.root_render_func(ctx)]  # type: ignore
             )
         except Exception:
             return self.environment.handle_exception()
+        finally:
+            if locale_token is not None:
+                render_locale.reset(locale_token)
 
 
 NativeEnvironment.template_class = NativeTemplate

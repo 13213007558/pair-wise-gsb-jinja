@@ -1,5 +1,6 @@
 """The runtime functions and state used by compiled templates."""
 
+import contextvars
 import functools
 import sys
 import typing as t
@@ -26,6 +27,15 @@ from .utils import pass_eval_context
 
 V = t.TypeVar("V")
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
+
+#: The locale selected for the current render, if any.  This is a context
+#: variable so that concurrent renders in different threads or async tasks
+#: each see their own locale.  It is set by ``Template.render(locale=...)``
+#: and by the i18n extension's ``use_locale`` context manager, and is read
+#: by the i18n extension's domain-aware gettext functions.
+render_locale: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "jinja2_render_locale", default=None
+)
 
 if t.TYPE_CHECKING:
     import logging
