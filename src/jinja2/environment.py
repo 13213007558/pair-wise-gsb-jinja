@@ -47,6 +47,9 @@ from .parser import Parser
 from .runtime import Context
 from .runtime import new_context
 from .runtime import Undefined
+from .sourcemap import mapped_concat
+from .sourcemap import public_segments
+from .sourcemap import SourceMapSegment
 from .utils import _PassArg
 from .utils import concat
 from .utils import consume
@@ -126,9 +129,9 @@ def load_extensions(
 
 def _environment_config_check(environment: _env_bound) -> _env_bound:
     """Perform a sanity check on the environment."""
-    assert issubclass(environment.undefined, Undefined), (
-        "'undefined' must be a subclass of 'jinja2.Undefined'."
-    )
+    assert issubclass(
+        environment.undefined, Undefined
+    ), "'undefined' must be a subclass of 'jinja2.Undefined'."
     assert (
         environment.block_start_string
         != environment.variable_start_string
@@ -615,10 +618,14 @@ class Environment:
             self.handle_exception(source=source)
 
     def _parse(
-        self, source: str, name: str | None, filename: str | None
+        self,
+        source: str,
+        name: str | None,
+        filename: str | None,
+        positions: bool = False,
     ) -> nodes.Template:
         """Internal parsing function used by `parse` and `compile`."""
-        return Parser(self, source, name, filename).parse()
+        return Parser(self, source, name, filename, positions=positions).parse()
 
     def lex(
         self,
@@ -663,12 +670,13 @@ class Environment:
         name: str | None,
         filename: str | None = None,
         state: str | None = None,
+        positions: bool = False,
     ) -> TokenStream:
         """Called by the parser to do the preprocessing and filtering
         for all the extensions.  Returns a :class:`~jinja2.lexer.TokenStream`.
         """
         source = self.preprocess(source, name, filename)
-        stream = self.lexer.tokenize(source, name, filename, state)
+        stream = self.lexer.tokenize(source, name, filename, state, positions=positions)
 
         for ext in self.iter_extensions():
             stream = ext.filter_stream(stream)  # type: ignore
@@ -684,6 +692,8 @@ class Environment:
         name: str | None,
         filename: str | None,
         defer_init: bool = False,
+        source_maps: bool = False,
+        mapped_source: str | None = None,
     ) -> str:
         """Internal hook that can be overridden to hook a different generate
         method in.
@@ -697,6 +707,8 @@ class Environment:
             filename,
             defer_init=defer_init,
             optimized=self.optimized,
+            source_maps=source_maps,
+            source=mapped_source,
         )
 
     def _compile(self, source: str, filename: str) -> CodeType:
@@ -715,6 +727,7 @@ class Environment:
         filename: str | None = None,
         raw: "te.Literal[False]" = False,
         defer_init: bool = False,
+        source_maps: bool = False,
     ) -> CodeType: ...
 
     @typing.overload
@@ -725,6 +738,7 @@ class Environment:
         filename: str | None = None,
         raw: "te.Literal[True]" = ...,
         defer_init: bool = False,
+        source_maps: bool = False,
     ) -> str: ...
 
     @internalcode
@@ -735,6 +749,7 @@ class Environment:
         filename: str | None = None,
         raw: bool = False,
         defer_init: bool = False,
+        source_maps: bool = False,
     ) -> str | CodeType:
         """Compile a node or template source code.  The `name` parameter is
         the load name of the template after it was joined using
@@ -755,12 +770,26 @@ class Environment:
         .. versionadded:: 2.4
            `defer_init` parameter added.
         """
+        mapped_source: str | None = None
         source_hint = None
         try:
+            if source_maps and not isinstance(source, str):
+                raise TypeError("source-map compilation requires template source")
+
             if isinstance(source, str):
                 source_hint = source
-                source = self._parse(source, name, filename)
-            source = self._generate(source, name, filename, defer_init=defer_init)
+                if source_maps:
+                    source_hint = source = self.lexer.normalize_source(source)
+                    mapped_source = source_hint
+                source = self._parse(source, name, filename, positions=source_maps)
+            source = self._generate(
+                source,
+                name,
+                filename,
+                defer_init=defer_init,
+                source_maps=source_maps,
+                mapped_source=mapped_source,
+            )
             if raw:
                 return source
             if filename is None:
@@ -977,6 +1006,96 @@ class Environment:
             self.cache[cache_key] = template
         return template
 
+    def _template_is_mapped(self, template: "Template") -> bool:
+        return getattr(template, "_source_mapped", False)
+
+    def _compile_template_with_map(
+        self,
+        name: str,
+        globals: t.MutableMapping[str, t.Any],
+    ) -> "Template":
+        assert self.loader is not None
+        source, filename, uptodate = self.loader.get_source(self, name)
+        source = self.lexer.normalize_source(self.preprocess(source, name))
+        code = self.compile(source, name, filename, source_maps=True)
+        template = self.template_class.from_code(
+            self, code, globals, uptodate, source_mapped=True
+        )
+        template._source = source
+        template._source_mapped = True
+        return template
+
+    @internalcode
+    def get_mapped_template(
+        self,
+        name: t.Union[str, "Template"],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if isinstance(name, Template) and self._template_is_mapped(name):
+            return name
+
+        source = getattr(name, "_source", "")
+
+        if isinstance(name, Template) and source:
+            code = self.compile(source, name.name, name.filename, source_maps=True)
+            mapped = name.from_code(
+                self,
+                code,
+                name.globals,
+                name._uptodate,
+                source_mapped=True,
+            )
+            mapped._source = name._source
+            mapped._source_mapped = True
+            return mapped
+
+        if (
+            isinstance(name, Template)
+            and name.name is not None
+            and self.loader is not None
+        ):
+            return self._compile_template_with_map(name.name, name.globals)
+
+        if isinstance(name, str):
+            if parent is not None:
+                name = self.join_path(name, parent)
+            return self._compile_template_with_map(name, self.make_globals(globals))
+
+        return self.get_template(name, parent, globals)
+
+    @internalcode
+    def get_mapped_select_template(
+        self,
+        names: t.Iterable[t.Union[str, "Template"]],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        for name in names:
+            if isinstance(name, Template) and self._template_is_mapped(name):
+                return name
+
+            try:
+                return self.get_mapped_template(name, parent, globals)
+            except (TemplateNotFound, UndefinedError):
+                continue
+
+        raise TemplatesNotFound(names)  # type: ignore[misc]
+
+    @internalcode
+    def get_mapped_or_select_template(
+        self,
+        template_name_or_list: t.Union[str, "Template", list[t.Union[str, "Template"]]],
+        parent: str | None = None,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if isinstance(template_name_or_list, list):
+            return self.get_mapped_select_template(
+                template_name_or_list, parent, globals
+            )
+
+        return self.get_mapped_template(template_name_or_list, parent, globals)
+
     @internalcode
     def get_template(
         self,
@@ -1105,7 +1224,12 @@ class Environment:
         """
         gs = self.make_globals(globals)
         cls = template_class or self.template_class
-        return cls.from_code(self, self.compile(source), gs, None)
+        template = cls.from_code(self, self.compile(source), gs, None)
+
+        if isinstance(source, str):
+            template._source = self.lexer.normalize_source(source)
+
+        return template
 
     def make_globals(
         self, d: t.MutableMapping[str, t.Any] | None
@@ -1160,6 +1284,8 @@ class Template:
     _module: t.Optional["TemplateModule"]
     _debug_info: str
     _uptodate: t.Callable[[], bool] | None
+    _source: str
+    _source_mapped: bool
 
     def __new__(
         cls,
@@ -1217,13 +1343,20 @@ class Template:
         code: CodeType,
         globals: t.MutableMapping[str, t.Any],
         uptodate: t.Callable[[], bool] | None = None,
+        source_mapped: bool = False,
     ) -> "Template":
         """Creates a template object from compiled code and the globals.  This
         is used by the loaders and environment to create a template object.
         """
-        namespace = {"environment": environment, "__file__": code.co_filename}
+        namespace = {
+            "environment": environment,
+            "__file__": code.co_filename,
+            "_source": "",
+        }
         exec(code, namespace)
         rv = cls._from_namespace(environment, namespace, globals)
+        if source_mapped:
+            rv._source_mapped = True
         rv._uptodate = uptodate
         return rv
 
@@ -1262,6 +1395,8 @@ class Template:
         # debug and loader helpers
         t._debug_info = namespace["debug_info"]
         t._uptodate = None
+        t._source = namespace.get("_source", "")
+        t._source_mapped = namespace.get("_source_mapped", False)
 
         # store the reference
         namespace["environment"] = environment
@@ -1313,6 +1448,26 @@ class Template:
             )
         except Exception:
             return self.environment.handle_exception()
+
+    def render_with_map(
+        self, *args: t.Any, **kwargs: t.Any
+    ) -> tuple[str, list[SourceMapSegment]]:
+        """Render the template and return output intervals with sources."""
+        if self.environment.is_async:
+            raise RuntimeError("Source-map rendering is not available in async mode.")
+
+        if not self._source_mapped:
+            mapped = self.environment.get_mapped_template(self)
+            return mapped.render_with_map(*args, **kwargs)
+
+        ctx = self.new_context(dict(*args, **kwargs))
+
+        try:
+            rendered = mapped_concat(self.root_render_func(ctx))
+        except Exception:
+            self.environment.handle_exception()
+
+        return str(rendered), public_segments(rendered)
 
     def stream(self, *args: t.Any, **kwargs: t.Any) -> "TemplateStream":
         """Works exactly like :meth:`generate` but returns a

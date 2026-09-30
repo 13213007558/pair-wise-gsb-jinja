@@ -57,9 +57,12 @@ class Parser:
         name: str | None = None,
         filename: str | None = None,
         state: str | None = None,
+        positions: bool = False,
     ) -> None:
         self.environment = environment
-        self.stream = environment._tokenize(source, name, filename, state)
+        self.stream = environment._tokenize(
+            source, name, filename, state, positions=positions
+        )
         self.name = name
         self.filename = filename
         self.closed = False
@@ -72,6 +75,7 @@ class Parser:
         self._last_identifier = 0
         self._tag_stack: list[str] = []
         self._end_token_stack: list[tuple[str, ...]] = []
+        self._block_start_pos = -1
 
     def fail(
         self,
@@ -319,6 +323,8 @@ class Parser:
                     self.fail("Required blocks can only contain comments or whitespace")
 
         self.stream.skip_if("name:" + node.name)
+        if self._block_start_pos >= 0:
+            node.set_position(self._block_start_pos, node.end_pos)
         return node
 
     def parse_extends(self) -> nodes.Extends:
@@ -416,7 +422,8 @@ class Parser:
         self.stream.expect("rparen")
 
     def parse_call_block(self) -> nodes.CallBlock:
-        node = nodes.CallBlock(lineno=next(self.stream).lineno)
+        start_token = next(self.stream)
+        node = nodes.CallBlock(lineno=start_token.lineno)
         if self.stream.current.type == "lparen":
             self.parse_signature(node)
         else:
@@ -427,19 +434,35 @@ class Parser:
         if not isinstance(call_node, nodes.Call):
             self.fail("expected call", node.lineno)
         node.call = call_node
+        node.set_position(
+            start_token.start_pos if start_token.start_pos >= 0 else None,
+            self.stream.current.end_pos if self.stream.current.end_pos >= 0 else None,
+        )
         node.body = self.parse_statements(("name:endcall",), drop_needle=True)
         return node
 
     def parse_filter_block(self) -> nodes.FilterBlock:
-        node = nodes.FilterBlock(lineno=next(self.stream).lineno)
+        start_token = next(self.stream)
+        node = nodes.FilterBlock(lineno=start_token.lineno)
         node.filter = self.parse_filter(None, start_inline=True)  # type: ignore
+        node.set_position(
+            start_token.start_pos if start_token.start_pos >= 0 else None,
+            self.stream.current.end_pos if self.stream.current.end_pos >= 0 else None,
+        )
         node.body = self.parse_statements(("name:endfilter",), drop_needle=True)
         return node
 
     def parse_macro(self) -> nodes.Macro:
-        node = nodes.Macro(lineno=next(self.stream).lineno)
+        start_token = next(self.stream)
+        node = nodes.Macro(lineno=start_token.lineno)
         node.name = self.parse_assign_target(name_only=True).name
         self.parse_signature(node)
+        node.set_position(
+            start_token.start_pos if start_token.start_pos >= 0 else None,
+            self.stream.current.start_pos
+            if self.stream.current.start_pos >= 0
+            else None,
+        )
         node.body = self.parse_statements(("name:endmacro",), drop_needle=True)
         return node
 
@@ -655,6 +678,7 @@ class Parser:
                 node = nodes.NSRef(token.value, attr.value, lineno=token.lineno)
             else:
                 node = nodes.Name(token.value, "load", lineno=token.lineno)
+            node.set_position(token.start_pos, token.end_pos)
         elif token.type == "string":
             next(self.stream)
             buf = [token.value]
@@ -663,9 +687,11 @@ class Parser:
                 buf.append(self.stream.current.value)
                 next(self.stream)
             node = nodes.Const("".join(buf), lineno=lineno)
+            node.set_position(token.start_pos, self.stream.current.end_pos)
         elif token.type in ("integer", "float"):
             next(self.stream)
             node = nodes.Const(token.value, lineno=token.lineno)
+            node.set_position(token.start_pos, token.end_pos)
         elif token.type == "lparen":
             next(self.stream)
             node = self.parse_tuple(explicit_parentheses=True)
@@ -1006,14 +1032,22 @@ class Parser:
                 token = self.stream.current
                 if token.type == "data":
                     if token.value:
-                        add_data(nodes.TemplateData(token.value, lineno=token.lineno))
+                        data_node = nodes.TemplateData(token.value, lineno=token.lineno)
+                        data_node.set_position(token.start_pos, token.end_pos)
+                        add_data(data_node)
                     next(self.stream)
                 elif token.type == "variable_begin":
                     next(self.stream)
-                    add_data(self.parse_tuple(with_condexpr=True))
-                    self.stream.expect("variable_end")
+                    expression = self.parse_tuple(with_condexpr=True)
+                    end_token = self.stream.expect("variable_end")
+                    expression.set_position(
+                        token.start_pos if token.start_pos >= 0 else None,
+                        end_token.end_pos if end_token.end_pos >= 0 else None,
+                    )
+                    add_data(expression)
                 elif token.type == "block_begin":
                     flush_data()
+                    self._block_start_pos = token.start_pos
                     next(self.stream)
                     if end_tokens is not None and self.stream.current.test_any(
                         *end_tokens
@@ -1024,7 +1058,14 @@ class Parser:
                         body.extend(rv)
                     else:
                         body.append(rv)
-                    self.stream.expect("block_end")
+                    end_token = self.stream.expect("block_end")
+                    if (
+                        self._block_start_pos >= 0
+                        and end_token.end_pos >= 0
+                        and isinstance(rv, (nodes.Include, nodes.Extends))
+                    ):
+                        rv.set_position(self._block_start_pos, end_token.end_pos)
+                    self._block_start_pos = -1
                 else:
                     raise AssertionError("internal parsing error")
 

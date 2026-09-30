@@ -120,11 +120,18 @@ class Node(metaclass=NodeType):
     """
 
     fields: tuple[str, ...] = ()
-    attributes: tuple[str, ...] = ("lineno", "environment")
+    attributes: tuple[str, ...] = (
+        "lineno",
+        "environment",
+        "start_pos",
+        "end_pos",
+    )
     abstract = True
 
     lineno: int
     environment: t.Optional["Environment"]
+    start_pos: int | None
+    end_pos: int | None
 
     def __init__(self, *fields: t.Any, **attributes: t.Any) -> None:
         if self.abstract:
@@ -226,6 +233,24 @@ class Node(metaclass=NodeType):
                 if node.lineno is None or override:
                     node.lineno = lineno
             todo.extend(node.iter_child_nodes())
+        return self
+
+    def set_position(self, start: int | None, end: int | None) -> "Node":
+        """Set source offsets for this node and all nodes without one."""
+        todo = deque([(self, start, end)])
+
+        while todo:
+            node, node_start, node_end = todo.popleft()
+
+            if node.start_pos is None:
+                node.start_pos = node_start
+
+            if node.end_pos is None:
+                node.end_pos = node_end
+
+            for child in node.iter_child_nodes():
+                todo.append((child, node_start, node_end))
+
         return self
 
     def set_environment(self, environment: "Environment") -> "Node":

@@ -106,13 +106,22 @@ def generate(
     stream: t.TextIO | None = None,
     defer_init: bool = False,
     optimized: bool = True,
+    source_maps: bool = False,
+    source: str | None = None,
 ) -> str | None:
     """Generate the python source for a node tree."""
     if not isinstance(node, nodes.Template):
         raise TypeError("Can't compile non template nodes")
 
     generator = environment.code_generator_class(
-        environment, name, filename, stream, defer_init, optimized
+        environment,
+        name,
+        filename,
+        stream,
+        defer_init,
+        optimized,
+        source_maps,
+        source,
     )
     generator.visit(node)
 
@@ -304,6 +313,8 @@ class CodeGenerator(NodeVisitor):
         stream: t.TextIO | None = None,
         defer_init: bool = False,
         optimized: bool = True,
+        source_maps: bool = False,
+        source: str | None = None,
     ) -> None:
         if stream is None:
             stream = StringIO()
@@ -313,9 +324,11 @@ class CodeGenerator(NodeVisitor):
         self.stream = stream
         self.created_block_context = False
         self.defer_init = defer_init
+        self.source_maps = source_maps
+        self.source = source
         self.optimizer: Optimizer | None = None
 
-        if optimized:
+        if optimized and not source_maps:
             self.optimizer = Optimizer(environment)
 
         # aliases for imports
@@ -369,6 +382,16 @@ class CodeGenerator(NodeVisitor):
         # Tracks the current context.
         self._context_reference_stack = ["context"]
 
+    def node_location(self, node: nodes.Node | None) -> str:
+        """Return generated Python for a node source location."""
+        if node is None or node.start_pos is None or node.end_pos is None:
+            return f"source_location({self.name!r}, source, 0, len(source))"
+
+        return (
+            f"source_location({self.name!r}, source,"
+            f" {node.start_pos}, {node.end_pos})"
+        )
+
     @property
     def optimized(self) -> bool:
         return self.optimizer is not None
@@ -393,21 +416,22 @@ class CodeGenerator(NodeVisitor):
         self, frame: Frame, force_unescaped: bool = False
     ) -> None:
         """Return the buffer contents of the frame."""
+        concat_name = "mapped_concat" if self.source_maps else "concat"
         if not force_unescaped:
             if frame.eval_ctx.volatile:
                 self.writeline("if context.eval_ctx.autoescape:")
                 self.indent()
-                self.writeline(f"return Markup(concat({frame.buffer}))")
+                self.writeline(f"return Markup({concat_name}({frame.buffer}))")
                 self.outdent()
                 self.writeline("else:")
                 self.indent()
-                self.writeline(f"return concat({frame.buffer})")
+                self.writeline(f"return {concat_name}({frame.buffer})")
                 self.outdent()
                 return
             elif frame.eval_ctx.autoescape:
-                self.writeline(f"return Markup(concat({frame.buffer}))")
+                self.writeline(f"return Markup({concat_name}({frame.buffer}))")
                 return
-        self.writeline(f"return concat({frame.buffer})")
+        self.writeline(f"return {concat_name}({frame.buffer})")
 
     def indent(self) -> None:
         """Indent by one."""
@@ -696,11 +720,19 @@ class CodeGenerator(NodeVisitor):
         name = getattr(macro_ref.node, "name", None)
         if len(macro_ref.node.args) == 1:
             arg_tuple += ","
-        self.write(
-            f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
-            f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
-            f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
-        )
+        if self.source_maps:
+            self.write(
+                f"MappedMacro(environment, macro, {name!r}, ({arg_tuple}),"
+                f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
+                f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape,"
+                f" source_location={self.node_location(macro_ref.node)})"
+            )
+        else:
+            self.write(
+                f"Macro(environment, macro, {name!r}, ({arg_tuple}),"
+                f" {macro_ref.accesses_kwargs!r}, {macro_ref.accesses_varargs!r},"
+                f" {macro_ref.accesses_caller!r}, context.eval_ctx.autoescape)"
+            )
 
     def position(self, node: nodes.Node) -> str:
         """Return a human readable position for the node."""
@@ -723,7 +755,10 @@ class CodeGenerator(NodeVisitor):
         """
         self.writeline("resolve = context.resolve_or_missing")
         self.writeline("undefined = environment.undefined")
-        self.writeline("concat = environment.concat")
+        if self.source_maps:
+            self.writeline("concat = mapped_concat")
+        else:
+            self.writeline("concat = environment.concat")
         # always use the standard Undefined class for the implicit else of
         # conditional expressions
         self.writeline("cond_expr_undefined = Undefined")
@@ -835,6 +870,15 @@ class CodeGenerator(NodeVisitor):
             exported_names = sorted(exported)
 
         self.writeline("from jinja2.runtime import " + ", ".join(exported_names))
+        if self.source_maps:
+            self.writeline(
+                "from jinja2.sourcemap import mapped_block_events,"
+                " mapped_call, mapped_concat, mapped_escape, mapped_include_events,"
+                " mapped_markup_join, mapped_output, mapped_str_join, mapped_text"
+            )
+            self.writeline("from jinja2.sourcemap import source_location")
+            self.writeline("MappedBlockReference = globals()['MappedBlockReference']")
+            self.writeline("MappedMacro = globals()['MappedMacro']")
 
         # if we want a deferred initialization we cannot move the
         # environment into a local name
@@ -863,6 +907,8 @@ class CodeGenerator(NodeVisitor):
 
         # add the load name
         self.writeline(f"name = {self.name!r}")
+        if self.source_maps:
+            self.writeline(f"source = {self.source!r}")
 
         # generate the root render function.
         self.writeline(
@@ -927,7 +973,21 @@ class CodeGenerator(NodeVisitor):
                 self.writeline(f"{ref} = TemplateReference(context)")
             if "super" in undeclared:
                 ref = block_frame.symbols.declare_parameter("super")
-                self.writeline(f"{ref} = context.super({name!r}, block_{name})")
+                if self.source_maps:
+                    super_calls = [
+                        node
+                        for node in block.find_all(nodes.Name)
+                        if node.name == "super" and node.ctx == "load"
+                    ]
+                    location = self.node_location(
+                        super_calls[0] if super_calls else block
+                    )
+                    self.writeline(
+                        f"{ref} = MappedBlockReference.from_super("
+                        f"context, {name!r}, block_{name}, {location})"
+                    )
+                else:
+                    self.writeline(f"{ref} = context.super({name!r}, block_{name})")
             block_frame.symbols.analyze_node(block)
             block_frame.block = name
             self.writeline("_block_vars = {}")
@@ -970,9 +1030,18 @@ class CodeGenerator(NodeVisitor):
             self.outdent()
 
         if not self.environment.is_async and frame.buffer is None:
-            self.writeline(
-                f"yield from context.blocks[{node.name!r}][0]({context})", node
-            )
+            if self.source_maps:
+                location = self.node_location(node)
+                self.writeline(
+                    f"yield from mapped_block_events("
+                    f"context.blocks[{node.name!r}][0]({context}),"
+                    f" {node.name!r}, {location})",
+                    node,
+                )
+            else:
+                self.writeline(
+                    f"yield from context.blocks[{node.name!r}][0]({context})", node
+                )
         else:
             self.writeline(f"gen = context.blocks[{node.name!r}][0]({context})")
             self.writeline("try:")
@@ -1016,7 +1085,12 @@ class CodeGenerator(NodeVisitor):
             else:
                 self.outdent()
 
-        self.writeline("parent_template = environment.get_template(", node)
+        get_template = (
+            "environment.get_mapped_template"
+            if self.source_maps
+            else "environment.get_template"
+        )
+        self.writeline(f"parent_template = {get_template}(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         self.writeline("for name, parent_block in parent_template.blocks.items():")
@@ -1048,7 +1122,11 @@ class CodeGenerator(NodeVisitor):
         elif isinstance(node.template, (nodes.Tuple, nodes.List)):
             func_name = "select_template"
 
-        self.writeline(f"template = environment.{func_name}(", node)
+        if self.source_maps:
+            get_template_func = "get_mapped_or_select_template"
+        else:
+            get_template_func = func_name
+        self.writeline(f"template = environment.{get_template_func}(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         if node.ignore_missing:
@@ -1062,9 +1140,18 @@ class CodeGenerator(NodeVisitor):
 
         def loop_body() -> None:
             self.indent()
-            self.simple_write("event", frame)
+            if self.source_maps:
+                self.start_write(frame, node)
+                self.write(
+                    "next(mapped_include_events((event,), template.name, location))"
+                )
+                self.end_write(frame)
+            else:
+                self.simple_write("event", frame)
             self.outdent()
 
+        if self.source_maps:
+            self.writeline(f"location = {self.node_location(node)}", node)
         if node.with_context:
             self.writeline(
                 f"gen = template.root_render_func("
@@ -1086,7 +1173,14 @@ class CodeGenerator(NodeVisitor):
             )
             loop_body()
         else:
-            self.writeline("yield from template._get_default_module()._body_stream")
+            if self.source_maps:
+                self.writeline(
+                    "yield from mapped_include_events("
+                    "template._get_default_module()._body_stream,"
+                    " template.name, location)"
+                )
+            else:
+                self.writeline("yield from template._get_default_module()._body_stream")
 
         if node.ignore_missing:
             self.outdent()
@@ -1094,7 +1188,12 @@ class CodeGenerator(NodeVisitor):
     def _import_common(
         self, node: nodes.Import | nodes.FromImport, frame: Frame
     ) -> None:
-        self.write(f"{self.choose_async('await ')}environment.get_template(")
+        get_template = (
+            "environment.get_mapped_template"
+            if self.source_maps
+            else "environment.get_template"
+        )
+        self.write(f"{self.choose_async('await ')}{get_template}(")
         self.visit(node.template, frame)
         self.write(f", {self.name!r}).")
 
@@ -1507,35 +1606,41 @@ class CodeGenerator(NodeVisitor):
         finalize = self._make_finalize()
         body: list[list[t.Any] | nodes.Expr] = []
 
-        # Evaluate constants at compile time if possible. Each item in
-        # body will be either a list of static data or a node to be
-        # evaluated at runtime.
-        for child in node.nodes:
-            try:
-                if not (
-                    # If the finalize function requires runtime context,
-                    # constants can't be evaluated at compile time.
-                    finalize.const
-                    # Unless it's basic template data that won't be
-                    # finalized anyway.
-                    or isinstance(child, nodes.TemplateData)
-                ):
-                    raise nodes.Impossible()
+        if self.source_maps:
+            body = list(node.nodes)
+        else:
+            body = []
 
-                const = self._output_child_to_const(child, frame, finalize)
-            except (nodes.Impossible, Exception):
-                # The node was not constant and needs to be evaluated at
-                # runtime. Or another error was raised, which is easier
-                # to debug at runtime.
-                body.append(child)
-                continue
+            # Evaluate constants at compile time if possible. Each item in
+            # body will be either a list of static data or a node to be
+            # evaluated at runtime.
+            if not self.source_maps:
+                for child in node.nodes:
+                    try:
+                        if not (
+                            # If the finalize function requires runtime context,
+                            # constants can't be evaluated at compile time.
+                            finalize.const
+                            # Unless it's basic template data that won't be
+                            # finalized anyway.
+                            or isinstance(child, nodes.TemplateData)
+                        ):
+                            raise nodes.Impossible()
 
-            if body and isinstance(body[-1], list):
-                body[-1].append(const)
-            else:
-                body.append([const])
+                        const = self._output_child_to_const(child, frame, finalize)
+                    except (nodes.Impossible, Exception):
+                        # The node was not constant and needs to be evaluated at
+                        # runtime. Or another error was raised, which is easier
+                        # to debug at runtime.
+                        body.append(child)
+                        continue
 
-        if frame.buffer is not None:
+                    if body and isinstance(body[-1], list):
+                        body[-1].append(const)
+                    else:
+                        body.append([const])
+
+        if frame.buffer is not None and not self.source_maps:
             if len(body) == 1:
                 self.writeline(f"{frame.buffer}.append(")
             else:
@@ -1552,6 +1657,38 @@ class CodeGenerator(NodeVisitor):
                     self.writeline("yield " + val)
                 else:
                     self.writeline(val + ",")
+            elif self.source_maps and isinstance(item, nodes.TemplateData):
+                location = self.node_location(item)
+                self.start_write(frame, item)
+                self.write(
+                    f"mapped_text({item.data!r}, {location},"
+                    " safe=context.eval_ctx.autoescape)"
+                )
+                self.end_write(frame)
+            elif self.source_maps:
+                location = self.node_location(item)
+                self.start_write(frame, item)
+
+                if frame.eval_ctx.volatile:
+                    self.write(
+                        "(mapped_escape if context.eval_ctx.autoescape"
+                        " else mapped_output)("
+                    )
+                elif frame.eval_ctx.autoescape:
+                    self.write("mapped_escape(")
+                else:
+                    self.write("mapped_output(")
+
+                if finalize.src is not None:
+                    self.write(finalize.src)
+
+                self.visit(item, frame)
+
+                if finalize.src is not None:
+                    self.write(")")
+
+                self.write(f", {location})")
+                self.end_write(frame)
             else:
                 if frame.buffer is None:
                     self.writeline("yield ", item)
@@ -1566,9 +1703,12 @@ class CodeGenerator(NodeVisitor):
                 if frame.buffer is not None:
                     self.write(",")
 
-        if frame.buffer is not None:
+        if frame.buffer is not None and not self.source_maps:
             self.outdent()
-            self.writeline(")" if len(body) == 1 else "))")
+            if len(body) == 1:
+                self.writeline(")")
+            else:
+                self.writeline("))")
 
         if frame.require_output_check:
             self.outdent()
@@ -1621,7 +1761,8 @@ class CodeGenerator(NodeVisitor):
         if node.filter is not None:
             self.visit_Filter(node.filter, block_frame)
         else:
-            self.write(f"concat({block_frame.buffer})")
+            concat_name = "mapped_concat" if self.source_maps else "concat"
+            self.write(f"{concat_name}({block_frame.buffer})")
         self.write(")")
         self.pop_assign_tracking(frame)
         self.leave_frame(block_frame)
@@ -1718,6 +1859,15 @@ class CodeGenerator(NodeVisitor):
 
     @optimizeconst
     def visit_Concat(self, node: nodes.Concat, frame: Frame) -> None:
+        if self.source_maps:
+            func_name = "mapped_concat"
+            self.write(f"{func_name}((")
+            for arg in node.nodes:
+                self.visit(arg, frame)
+                self.write(", ")
+            self.write("))")
+            return
+
         if frame.eval_ctx.volatile:
             func_name = "(markup_join if context.eval_ctx.volatile else str_join)"
         elif frame.eval_ctx.autoescape:
@@ -1829,6 +1979,7 @@ class CodeGenerator(NodeVisitor):
 
     @optimizeconst
     def visit_Filter(self, node: nodes.Filter, frame: Frame) -> None:
+        concat_name = "mapped_concat" if self.source_maps else "concat"
         with self._filter_test_common(node, frame, True):
             # if the filter node is None we are inside a filter block
             # and want to write to the current buffer
@@ -1836,13 +1987,14 @@ class CodeGenerator(NodeVisitor):
                 self.visit(node.node, frame)
             elif frame.eval_ctx.volatile:
                 self.write(
-                    f"(Markup(concat({frame.buffer}))"
-                    f" if context.eval_ctx.autoescape else concat({frame.buffer}))"
+                    f"(Markup({concat_name}({frame.buffer}))"
+                    f" if context.eval_ctx.autoescape else"
+                    f" {concat_name}({frame.buffer}))"
                 )
             elif frame.eval_ctx.autoescape:
-                self.write(f"Markup(concat({frame.buffer}))")
+                self.write(f"Markup({concat_name}({frame.buffer}))")
             else:
-                self.write(f"concat({frame.buffer})")
+                self.write(f"{concat_name}({frame.buffer})")
 
     @optimizeconst
     def visit_Test(self, node: nodes.Test, frame: Frame) -> None:
@@ -1878,11 +2030,17 @@ class CodeGenerator(NodeVisitor):
     ) -> None:
         if self.environment.is_async:
             self.write("(await auto_await(")
-        if self.environment.sandboxed:
+        if self.environment.sandboxed and not self.source_maps:
             self.write("environment.call(context, ")
+            self.visit(node.node, frame)
+        elif self.source_maps:
+            self.write("mapped_call(context, ")
+            self.visit(node.node, frame)
+            self.write(f", {self.node_location(node)}")
         else:
             self.write("context.call(")
-        self.visit(node.node, frame)
+            self.visit(node.node, frame)
+
         extra_kwargs = {"caller": "caller"} if forward_caller else None
         loop_kwargs = {"_loop_vars": "_loop_vars"} if frame.loop_frame else {}
         block_kwargs = {"_block_vars": "_block_vars"} if frame.block_frame else {}

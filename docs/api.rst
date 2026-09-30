@@ -207,6 +207,8 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 
     .. automethod:: render([context])
 
+    .. automethod:: render_with_map([context])
+
     .. automethod:: generate([context])
 
     .. automethod:: stream([context])
@@ -218,6 +220,21 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 
 .. autoclass:: jinja2.environment.TemplateStream()
     :members: disable_buffering, enable_buffering, dump
+
+
+Render Source Maps
+~~~~~~~~~~~~~~~~~~
+
+:meth:`Template.render_with_map` returns ``(rendered, segments)``. Each
+:class:`SourceMapSegment` covers a half-open character interval in the
+final output and points to the template characters that produced it. The
+optional call stack identifies ``include``, block, ``block.super``, and
+macro invocations. Source and output indexes are Python character indexes,
+including non-ASCII text.
+
+.. autoclass:: jinja2.sourcemap.SourceLocation
+.. autoclass:: jinja2.sourcemap.MapFrame
+.. autoclass:: jinja2.sourcemap.SourceMapSegment
 
 
 Autoescaping

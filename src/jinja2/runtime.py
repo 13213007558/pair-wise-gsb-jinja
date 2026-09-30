@@ -59,6 +59,8 @@ exported = [
     "Namespace",
     "Undefined",
     "internalcode",
+    "MappedMacro",
+    "MappedBlockReference",
 ]
 async_exported = [
     "AsyncLoopContext",
@@ -391,6 +393,51 @@ class BlockReference:
         return rv
 
 
+class MappedBlockReference(BlockReference):
+    def __init__(self, *args: t.Any, source_location: t.Any, **kwargs: t.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._source_location = source_location
+
+    @classmethod
+    def from_super(
+        cls,
+        context: "Context",
+        name: str,
+        current: t.Callable[["Context"], t.Iterator[str]],
+        source_location: t.Any,
+    ) -> t.Union["MappedBlockReference", "Undefined"]:
+        reference = context.super(name, current)
+
+        if isinstance(reference, BlockReference):
+            return cls(
+                reference.name,
+                reference._context,
+                reference._stack,
+                reference._depth,
+                source_location=source_location,
+            )
+
+        return reference
+
+    def __call__(self) -> str:
+        from .sourcemap import map_frame
+        from .sourcemap import mapped_concat
+        from .sourcemap import mapped_text
+        from .sourcemap import MappedText
+        from .sourcemap import push_frame
+
+        events = self._stack[self._depth](self._context)
+        frame = map_frame("block.super", self.name, self._source_location)
+        mapped_events = (
+            type(event)(event, push_frame(event.segments, frame))
+            if isinstance(event, MappedText)
+            else mapped_text(event, self._source_location, (frame,))
+            for event in events
+            if event
+        )
+        return mapped_concat(mapped_events)
+
+
 class LoopContext:
     """A wrapper iterable for dynamic ``for`` loops, with information
     about the loop and iteration.
@@ -710,8 +757,11 @@ class Macro:
         # argument to callables otherwise anyway.  Worst case here is
         # that if no eval context is passed we fall back to the compile
         # time autoescape flag.
+        source_call: t.Any = None
+
         if args and isinstance(args[0], EvalContext):
             autoescape = args[0].autoescape
+            source_call = getattr(args[0], "_jinja_source_call", None)
             args = args[1:]
         else:
             autoescape = self._default_autoescape
@@ -767,9 +817,14 @@ class Macro:
                 f" {len(self.arguments)} argument(s)"
             )
 
-        return self._invoke(arguments, autoescape)
+        return self._invoke(arguments, autoescape, source_call)
 
-    async def _async_invoke(self, arguments: list[t.Any], autoescape: bool) -> str:
+    async def _async_invoke(
+        self,
+        arguments: list[t.Any],
+        autoescape: bool,
+        source_call: t.Any = None,
+    ) -> str:
         rv = await self._func(*arguments)  # type: ignore
 
         if autoescape:
@@ -777,9 +832,16 @@ class Macro:
 
         return rv  # type: ignore
 
-    def _invoke(self, arguments: list[t.Any], autoescape: bool) -> str:
+    def _invoke(
+        self,
+        arguments: list[t.Any],
+        autoescape: bool,
+        source_call: t.Any = None,
+    ) -> str:
         if self._environment.is_async:
-            return self._async_invoke(arguments, autoescape)  # type: ignore
+            return self._async_invoke(  # type: ignore
+                arguments, autoescape, source_call
+            )
 
         rv = self._func(*arguments)
 
@@ -791,6 +853,40 @@ class Macro:
     def __repr__(self) -> str:
         name = "anonymous" if self.name is None else repr(self.name)
         return f"<{type(self).__name__} {name}>"
+
+
+class MappedMacro(Macro):
+    """Macro wrapper used by source-map-enabled compiled templates."""
+
+    def __init__(self, *args: t.Any, source_location: t.Any, **kwargs: t.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._source_location = source_location
+
+    async def _async_invoke(
+        self,
+        arguments: list[t.Any],
+        autoescape: bool,
+        source_call: t.Any = None,
+    ) -> str:
+        from .sourcemap import mapped_macro_result
+
+        rv = await self._func(*arguments)  # type: ignore
+        if autoescape and not isinstance(rv, Markup):
+            rv = Markup(rv)
+        return mapped_macro_result(rv, self.name, self._source_location, source_call)
+
+    def _invoke(
+        self,
+        arguments: list[t.Any],
+        autoescape: bool,
+        source_call: t.Any = None,
+    ) -> str:
+        from .sourcemap import mapped_macro_result
+
+        rv = self._func(*arguments)
+        if autoescape and not isinstance(rv, Markup):
+            rv = Markup(rv)
+        return mapped_macro_result(rv, self.name, self._source_location, source_call)
 
 
 class Undefined:
