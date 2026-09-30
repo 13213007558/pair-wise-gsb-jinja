@@ -41,6 +41,7 @@ from .exceptions import TemplateSyntaxError
 from .exceptions import UndefinedError
 from .lexer import get_lexer
 from .lexer import Lexer
+from .lexer import newline_re
 from .lexer import TokenStream
 from .nodes import EvalContext
 from .parser import Parser
@@ -61,6 +62,7 @@ if t.TYPE_CHECKING:
     from .bccache import BytecodeCache
     from .ext import Extension
     from .loaders import BaseLoader
+    from .sourcemap import RenderMap
 
 _env_bound = t.TypeVar("_env_bound", bound="Environment")
 
@@ -359,6 +361,11 @@ class Environment:
         self.bytecode_cache = bytecode_cache
         self.auto_reload = auto_reload
 
+        # Cache of templates compiled in source map mode, used by
+        # Template.render_with_map.  Kept separate from :attr:`cache`
+        # so that regular rendering is unaffected.
+        self._mapped_cache: dict[str, Template] = {}
+
         # configurable policies
         self.policies = DEFAULT_POLICIES.copy()
 
@@ -443,6 +450,8 @@ class Environment:
             rv.cache = create_cache(cache_size)
         else:
             rv.cache = copy_cache(self.cache)
+
+        rv._mapped_cache = dict(self._mapped_cache)
 
         rv.extensions = {}
         for key, value in self.extensions.items():
@@ -706,6 +715,44 @@ class Environment:
         .. versionadded:: 2.5
         """
         return compile(source, filename, "exec")
+
+    def _generate_mapped(
+        self,
+        source: nodes.Template,
+        name: str | None,
+        filename: str | None,
+        source_lines: list[str],
+    ) -> str:
+        """Generate Python source for a parsed template in source map
+        mode.  The generated code yields source map events instead of
+        plain strings.  Only used by :meth:`Template.render_with_map`.
+        """
+        return generate(  # type: ignore
+            source,
+            self,
+            name,
+            filename,
+            optimized=self.optimized,
+            source_map=True,
+            source_lines=source_lines,
+        )
+
+    def _compile_mapped(
+        self, source: str, name: str | None, filename: str | None
+    ) -> CodeType:
+        """Compile template source in source map mode."""
+        if self.is_async:
+            raise RuntimeError(
+                "Source mapped rendering is not supported in async mode."
+            )
+
+        try:
+            node = self._parse(source, name, filename)
+            source_lines = newline_re.split(source)[::2]
+            generated = self._generate_mapped(node, name, filename, source_lines)
+            return self._compile(generated, filename or "<template>")
+        except TemplateSyntaxError:
+            self.handle_exception(source=source)
 
     @typing.overload
     def compile(
@@ -1086,6 +1133,98 @@ class Environment:
             return template_name_or_list
         return self.select_template(template_name_or_list, parent, globals)
 
+    @internalcode
+    def _get_mapped_template(self, name: str, parent: str | None = None) -> "Template":
+        """Load a template compiled in source map mode.  Used by
+        generated template code and :meth:`Template.render_with_map`.
+        """
+        if isinstance(name, Template):
+            return self._mapped_template_for(name)
+
+        if parent is not None:
+            name = self.join_path(name, parent)
+
+        template = self._mapped_cache.get(name)
+
+        if template is not None:
+            return template
+
+        if self.loader is None:
+            raise TypeError("no loader for this environment specified")
+
+        source, filename, _ = self.loader.get_source(self, name)
+        code = self._compile_mapped(source, name, filename)
+        template = self.template_class.from_code(self, code, self.globals)
+        self._mapped_cache[name] = template
+        return template
+
+    @internalcode
+    def _select_mapped_template(
+        self, names: t.Iterable[str], parent: str | None = None
+    ) -> "Template":
+        """Like :meth:`select_template` but loads templates compiled in
+        source map mode.
+        """
+        if isinstance(names, Undefined):
+            names._fail_with_undefined_error()
+
+        if not names:
+            raise TemplatesNotFound(
+                message="Tried to select from an empty list of templates."
+            )
+
+        for name in names:
+            if isinstance(name, Template):
+                return self._mapped_template_for(name)
+            if parent is not None:
+                name = self.join_path(name, parent)
+            try:
+                return self._get_mapped_template(name)
+            except (TemplateNotFound, UndefinedError):
+                pass
+        raise TemplatesNotFound(names)  # type: ignore
+
+    @internalcode
+    def _get_or_select_mapped_template(
+        self,
+        template_name_or_list: str | list[str],
+        parent: str | None = None,
+    ) -> "Template":
+        """Like :meth:`get_or_select_template` but loads templates
+        compiled in source map mode.
+        """
+        if isinstance(template_name_or_list, (str, Undefined)):
+            return self._get_mapped_template(template_name_or_list, parent)
+        elif isinstance(template_name_or_list, Template):
+            return self._mapped_template_for(template_name_or_list)
+        return self._select_mapped_template(template_name_or_list, parent)
+
+    def _mapped_template_for(self, template: "Template") -> "Template":
+        """Return the source map compiled variant of ``template``,
+        compiling and caching it on first use.
+        """
+        mapped = template.__dict__.get("_mapped_variant")
+
+        if mapped is not None:
+            return mapped
+
+        if template.name is not None and self.loader is not None:
+            return self._get_mapped_template(template.name)
+
+        source = template.__dict__.get("_source")
+
+        if source is None:
+            raise RuntimeError(
+                "Cannot render with a source map: the template source is"
+                " not available. Load the template through a loader or"
+                " Environment.from_string."
+            )
+
+        code = self._compile_mapped(source, template.name, template.filename)
+        mapped = self.template_class.from_code(self, code, template.globals)
+        template.__dict__["_mapped_variant"] = mapped
+        return mapped
+
     def from_string(
         self,
         source: str | nodes.Template,
@@ -1105,7 +1244,14 @@ class Environment:
         """
         gs = self.make_globals(globals)
         cls = template_class or self.template_class
-        return cls.from_code(self, self.compile(source), gs, None)
+        template = cls.from_code(self, self.compile(source), gs, None)
+
+        if isinstance(source, str):
+            # Keep the source around so that render_with_map can
+            # compile a source mapped variant on demand.
+            template.__dict__["_source"] = source
+
+        return template
 
     def make_globals(
         self, d: t.MutableMapping[str, t.Any] | None
@@ -1365,6 +1511,35 @@ class Template:
                     yield event
         except Exception:
             yield self.environment.handle_exception()
+
+    def render_with_map(self, *args: t.Any, **kwargs: t.Any) -> "RenderMap":
+        """Render the template like :meth:`render`, but also return a
+        source map that records which template source produced each
+        range of output characters.
+
+        Returns a :class:`jinja2.sourcemap.RenderMap`, which can be
+        unpacked as ``text, spans``.  ``text`` is identical to
+        what :meth:`render` returns for the same arguments.
+        ``spans`` is a list of :class:`jinja2.sourcemap.MapEntry`
+        items ordered by output character range, covering every
+        character of the output exactly once.  Each entry records the
+        template name, the source line and column range, and the
+        macro / include call stack that produced the text.
+
+        The template (and any templates it extends, includes, or
+        imports) is compiled separately in source map mode on first
+        use, so regular rendering is not affected.  Async environments
+        are not supported.
+        """
+        from .sourcemap import build_render_map
+
+        mapped = self.environment._mapped_template_for(self)
+        ctx = mapped.new_context(dict(*args, **kwargs))
+
+        try:
+            return build_render_map(mapped.root_render_func(ctx))
+        except Exception:
+            self.environment.handle_exception()
 
     def new_context(
         self,

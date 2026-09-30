@@ -106,14 +106,29 @@ def generate(
     stream: t.TextIO | None = None,
     defer_init: bool = False,
     optimized: bool = True,
+    source_map: bool = False,
+    source_lines: list[str] | None = None,
 ) -> str | None:
     """Generate the python source for a node tree."""
     if not isinstance(node, nodes.Template):
         raise TypeError("Can't compile non template nodes")
 
-    generator = environment.code_generator_class(
-        environment, name, filename, stream, defer_init, optimized
-    )
+    if source_map:
+        generator = environment.code_generator_class(
+            environment,
+            name,
+            filename,
+            stream,
+            defer_init,
+            optimized,
+            source_map=True,
+            source_lines=source_lines,
+        )
+    else:
+        generator = environment.code_generator_class(
+            environment, name, filename, stream, defer_init, optimized
+        )
+
     generator.visit(node)
 
     if stream is None:
@@ -304,6 +319,8 @@ class CodeGenerator(NodeVisitor):
         stream: t.TextIO | None = None,
         defer_init: bool = False,
         optimized: bool = True,
+        source_map: bool = False,
+        source_lines: list[str] | None = None,
     ) -> None:
         if stream is None:
             stream = StringIO()
@@ -311,6 +328,17 @@ class CodeGenerator(NodeVisitor):
         self.name = name
         self.filename = filename
         self.stream = stream
+
+        # If source map mode is enabled the generated code yields
+        # jinja2.sourcemap._MapEvent objects instead of plain strings.
+        # This is only used by Template.render_with_map and never for
+        # regular rendering.
+        self.source_map = source_map
+
+        # The template source split into lines, used to compute column
+        # ranges for source map spans.
+        self.source_lines = source_lines
+
         self.created_block_context = False
         self.defer_init = defer_init
         self.optimizer: Optimizer | None = None
@@ -393,6 +421,20 @@ class CodeGenerator(NodeVisitor):
         self, frame: Frame, force_unescaped: bool = False
     ) -> None:
         """Return the buffer contents of the frame."""
+        if self.source_map:
+            if not force_unescaped:
+                if frame.eval_ctx.volatile:
+                    self.writeline(
+                        f"return _map_flatten({frame.buffer},"
+                        " markup=context.eval_ctx.autoescape)"
+                    )
+                    return
+                elif frame.eval_ctx.autoescape:
+                    self.writeline(f"return _map_flatten({frame.buffer}, markup=True)")
+                    return
+            self.writeline(f"return _map_flatten({frame.buffer})")
+            return
+
         if not force_unescaped:
             if frame.eval_ctx.volatile:
                 self.writeline("if context.eval_ctx.autoescape:")
@@ -709,6 +751,25 @@ class CodeGenerator(NodeVisitor):
             rv = f"{rv} in {self.name!r}"
         return rv
 
+    def map_span(self, node: nodes.Node) -> str:
+        """Return source code for a :class:`jinja2.sourcemap.SourceSpan`
+        literal covering the node's position.  Only used in source map
+        mode.  Line numbers are exact; columns span the whole source
+        line (or lines for multi-line template data).
+        """
+        line = node.lineno
+        end_line = line
+
+        if isinstance(node, nodes.TemplateData):
+            end_line = line + node.data.count("\n")
+
+        end_col = 1
+
+        if self.source_lines is not None and 1 <= end_line <= len(self.source_lines):
+            end_col = len(self.source_lines[end_line - 1]) + 1
+
+        return f"_Span({self.name!r}, {line}, 1, {end_line}, {end_col})"
+
     def dump_local_context(self, frame: Frame) -> str:
         items_kv = ", ".join(
             f"{name!r}: {target}"
@@ -835,6 +896,13 @@ class CodeGenerator(NodeVisitor):
             exported_names = sorted(exported)
 
         self.writeline("from jinja2.runtime import " + ", ".join(exported_names))
+
+        if self.source_map:
+            self.writeline(
+                "from jinja2.sourcemap import CallFrame as _CallFrame,"
+                " SourceSpan as _Span, _map_callee, _map_escape, _map_event,"
+                " _map_flatten, _map_pop, _map_push, _map_str, _map_wrap"
+            )
 
         # if we want a deferred initialization we cannot move the
         # environment into a local name
@@ -1016,7 +1084,10 @@ class CodeGenerator(NodeVisitor):
             else:
                 self.outdent()
 
-        self.writeline("parent_template = environment.get_template(", node)
+        if self.source_map:
+            self.writeline("parent_template = environment._get_mapped_template(", node)
+        else:
+            self.writeline("parent_template = environment.get_template(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
         self.writeline("for name, parent_block in parent_template.blocks.items():")
@@ -1048,6 +1119,13 @@ class CodeGenerator(NodeVisitor):
         elif isinstance(node.template, (nodes.Tuple, nodes.List)):
             func_name = "select_template"
 
+        if self.source_map:
+            func_name = {
+                "get_template": "_get_mapped_template",
+                "select_template": "_select_mapped_template",
+                "get_or_select_template": "_get_or_select_mapped_template",
+            }[func_name]
+
         self.writeline(f"template = environment.{func_name}(", node)
         self.visit(node.template, frame)
         self.write(f", {self.name!r})")
@@ -1064,6 +1142,19 @@ class CodeGenerator(NodeVisitor):
             self.indent()
             self.simple_write("event", frame)
             self.outdent()
+
+        map_token = None
+
+        if self.source_map:
+            # Push an include call frame so that the events produced by
+            # the included template record this call site.
+            map_token = self.temporary_identifier()
+            self.writeline(
+                f"{map_token} = _map_push(_CallFrame('include',"
+                f" template.name, {self.name!r}, {node.lineno}, 1))"
+            )
+            self.writeline("try:")
+            self.indent()
 
         if node.with_context:
             self.writeline(
@@ -1088,13 +1179,25 @@ class CodeGenerator(NodeVisitor):
         else:
             self.writeline("yield from template._get_default_module()._body_stream")
 
+        if self.source_map:
+            self.outdent()
+            self.writeline("finally:")
+            self.indent()
+            self.writeline(f"_map_pop({map_token})")
+            self.outdent()
+
         if node.ignore_missing:
             self.outdent()
 
     def _import_common(
         self, node: nodes.Import | nodes.FromImport, frame: Frame
     ) -> None:
-        self.write(f"{self.choose_async('await ')}environment.get_template(")
+        if self.source_map:
+            self.write(
+                f"{self.choose_async('await ')}environment._get_mapped_template("
+            )
+        else:
+            self.write(f"{self.choose_async('await ')}environment.get_template(")
         self.visit(node.template, frame)
         self.write(f", {self.name!r}).")
 
@@ -1296,7 +1399,13 @@ class CodeGenerator(NodeVisitor):
         if node.recursive:
             self.return_buffer_contents(loop_frame)
             self.outdent()
-            self.start_write(frame, node)
+            if self.source_map:
+                if frame.buffer is None:
+                    self.writeline("yield from _map_wrap(", node)
+                else:
+                    self.writeline(f"{frame.buffer}.extend(_map_wrap(", node)
+            else:
+                self.start_write(frame, node)
             self.write(f"{self.choose_async('await ')}loop(")
             if self.environment.is_async:
                 self.write("auto_aiter(")
@@ -1304,7 +1413,11 @@ class CodeGenerator(NodeVisitor):
             if self.environment.is_async:
                 self.write(")")
             self.write(", loop)")
-            self.end_write(frame)
+            if self.source_map:
+                self.write(f", {self.map_span(node)})")
+                self.end_write(frame)
+            else:
+                self.end_write(frame)
 
         # at the end of the iteration, clear any assignments made in the
         # loop from the top level
@@ -1346,9 +1459,19 @@ class CodeGenerator(NodeVisitor):
         call_frame, macro_ref = self.macro_body(node, frame)
         self.writeline("caller = ")
         self.macro_def(macro_ref, call_frame)
-        self.start_write(frame, node)
+        if self.source_map:
+            if frame.buffer is None:
+                self.writeline("yield from _map_wrap(", node)
+            else:
+                self.writeline(f"{frame.buffer}.extend(_map_wrap(", node)
+        else:
+            self.start_write(frame, node)
         self.visit_Call(node.call, frame, forward_caller=True)
-        self.end_write(frame)
+        if self.source_map:
+            self.write(f", {self.map_span(node)})")
+            self.end_write(frame)
+        else:
+            self.end_write(frame)
 
     def visit_FilterBlock(self, node: nodes.FilterBlock, frame: Frame) -> None:
         filter_frame = frame.inner()
@@ -1356,9 +1479,19 @@ class CodeGenerator(NodeVisitor):
         self.enter_frame(filter_frame)
         self.buffer(filter_frame)
         self.blockvisit(node.body, filter_frame)
-        self.start_write(frame, node)
+        if self.source_map:
+            if frame.buffer is None:
+                self.writeline("yield from _map_wrap(", node)
+            else:
+                self.writeline(f"{frame.buffer}.extend(_map_wrap(", node)
+        else:
+            self.start_write(frame, node)
         self.visit_Filter(node.filter, filter_frame)
-        self.end_write(frame)
+        if self.source_map:
+            self.write(f", {self.map_span(node)})")
+            self.end_write(frame)
+        else:
+            self.end_write(frame)
         self.leave_frame(filter_frame)
 
     def visit_With(self, node: nodes.With, frame: Frame) -> None:
@@ -1473,6 +1606,21 @@ class CodeGenerator(NodeVisitor):
         """Output extra source code before visiting a child of an
         ``Output`` node.
         """
+        if self.source_map:
+            if frame.eval_ctx.volatile:
+                self.write(
+                    "(_map_escape if context.eval_ctx.autoescape else _map_str)("
+                )
+            elif frame.eval_ctx.autoescape:
+                self.write("_map_escape(")
+            else:
+                self.write("_map_str(")
+
+            if finalize.src is not None:
+                self.write(finalize.src)
+
+            return
+
         if frame.eval_ctx.volatile:
             self.write("(escape if context.eval_ctx.autoescape else str)(")
         elif frame.eval_ctx.autoescape:
@@ -1530,12 +1678,19 @@ class CodeGenerator(NodeVisitor):
                 body.append(child)
                 continue
 
+            if self.source_map:
+                # In source map mode constants are not merged, each one
+                # is emitted with the position of the node that
+                # produced it.
+                body.append((const, child))  # type: ignore[arg-type]
+                continue
+
             if body and isinstance(body[-1], list):
                 body[-1].append(const)
             else:
                 body.append([const])
 
-        if frame.buffer is not None:
+        if frame.buffer is not None and not self.source_map:
             if len(body) == 1:
                 self.writeline(f"{frame.buffer}.append(")
             else:
@@ -1544,6 +1699,10 @@ class CodeGenerator(NodeVisitor):
             self.indent()
 
         for item in body:
+            if self.source_map:
+                self._visit_mapped_output_item(item, frame, finalize)
+                continue
+
             if isinstance(item, list):
                 # A group of constant data to join and output.
                 val = self._output_const_repr(item)
@@ -1566,12 +1725,46 @@ class CodeGenerator(NodeVisitor):
                 if frame.buffer is not None:
                     self.write(",")
 
-        if frame.buffer is not None:
+        if frame.buffer is not None and not self.source_map:
             self.outdent()
             self.writeline(")" if len(body) == 1 else "))")
 
         if frame.require_output_check:
             self.outdent()
+
+    def _visit_mapped_output_item(
+        self,
+        item: "tuple[t.Any, nodes.Expr] | nodes.Expr",
+        frame: Frame,
+        finalize: _FinalizeInfo,
+    ) -> None:
+        """Emit one item of an Output node in source map mode.
+        Constants become a single map event, runtime expressions are
+        wrapped so the evaluated value is converted to events.
+        """
+        if isinstance(item, tuple):
+            const, child = item
+            const_repr = self._output_const_repr([const])
+            event = f"_map_event({const_repr}, {self.map_span(child)})"
+
+            if frame.buffer is None:
+                self.writeline("yield " + event)
+            else:
+                self.writeline(f"{frame.buffer}.append({event})")
+
+            return
+
+        if frame.buffer is None:
+            self.writeline("yield from _map_wrap(", item)
+        else:
+            self.writeline(f"{frame.buffer}.extend(_map_wrap(", item)
+
+        # A node to be evaluated at runtime.
+        self._output_child_pre(item, frame, finalize)
+        self.visit(item, frame)
+        self._output_child_post(item, frame, finalize)
+        self.write(f", {self.map_span(item)})")
+        self.end_write(frame)
 
     def visit_Assign(self, node: nodes.Assign, frame: Frame) -> None:
         self.push_assign_tracking()
@@ -1617,12 +1810,18 @@ class CodeGenerator(NodeVisitor):
         self.blockvisit(node.body, block_frame)
         self.newline(node)
         self.visit(node.target, frame)
-        self.write(" = (Markup if context.eval_ctx.autoescape else identity)(")
-        if node.filter is not None:
-            self.visit_Filter(node.filter, block_frame)
+        if self.source_map and node.filter is None:
+            self.write(
+                f" = _map_flatten({block_frame.buffer},"
+                " markup=context.eval_ctx.autoescape)"
+            )
         else:
-            self.write(f"concat({block_frame.buffer})")
-        self.write(")")
+            self.write(" = (Markup if context.eval_ctx.autoescape else identity)(")
+            if node.filter is not None:
+                self.visit_Filter(node.filter, block_frame)
+            else:
+                self.write(f"concat({block_frame.buffer})")
+            self.write(")")
         self.pop_assign_tracking(frame)
         self.leave_frame(block_frame)
 
@@ -1834,6 +2033,16 @@ class CodeGenerator(NodeVisitor):
             # and want to write to the current buffer
             if node.node is not None:
                 self.visit(node.node, frame)
+            elif self.source_map:
+                if frame.eval_ctx.volatile:
+                    self.write(
+                        f"_map_flatten({frame.buffer},"
+                        " markup=context.eval_ctx.autoescape)"
+                    )
+                elif frame.eval_ctx.autoescape:
+                    self.write(f"_map_flatten({frame.buffer}, markup=True)")
+                else:
+                    self.write(f"_map_flatten({frame.buffer})")
             elif frame.eval_ctx.volatile:
                 self.write(
                     f"(Markup(concat({frame.buffer}))"
@@ -1882,7 +2091,13 @@ class CodeGenerator(NodeVisitor):
             self.write("environment.call(context, ")
         else:
             self.write("context.call(")
-        self.visit(node.node, frame)
+        if self.source_map:
+            # Wrap macros so a call frame is pushed while they run.
+            self.write("_map_callee(")
+            self.visit(node.node, frame)
+            self.write(f", ({self.name!r}, {node.lineno}, 1))")
+        else:
+            self.visit(node.node, frame)
         extra_kwargs = {"caller": "caller"} if forward_caller else None
         loop_kwargs = {"_loop_vars": "_loop_vars"} if frame.loop_frame else {}
         block_kwargs = {"_block_vars": "_block_vars"} if frame.block_frame else {}

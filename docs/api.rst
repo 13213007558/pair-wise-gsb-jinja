@@ -207,6 +207,8 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 
     .. automethod:: render([context])
 
+    .. automethod:: render_with_map([context])
+
     .. automethod:: generate([context])
 
     .. automethod:: stream([context])
@@ -218,6 +220,18 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 
 .. autoclass:: jinja2.environment.TemplateStream()
     :members: disable_buffering, enable_buffering, dump
+
+
+Source Maps
+-----------
+
+.. autoclass:: jinja2.sourcemap.RenderMap()
+
+.. autoclass:: jinja2.sourcemap.MapEntry()
+
+.. autoclass:: jinja2.sourcemap.CallFrame()
+
+.. autoclass:: jinja2.sourcemap.SourceSpan()
 
 
 Autoescaping

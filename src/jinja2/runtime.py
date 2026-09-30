@@ -16,6 +16,8 @@ from .exceptions import TemplateNotFound  # noqa: F401
 from .exceptions import TemplateRuntimeError  # noqa: F401
 from .exceptions import UndefinedError
 from .nodes import EvalContext
+from .sourcemap import concat_events
+from .sourcemap import MappedString
 from .utils import _PassArg
 from .utils import concat
 from .utils import internalcode
@@ -381,11 +383,17 @@ class BlockReference:
         if self._context.environment.is_async:
             return self._async_call()  # type: ignore
 
-        rv = self._context.environment.concat(  # type: ignore
-            self._stack[self._depth](self._context)
+        # concat_events flattens source map events when the template
+        # was compiled in source map mode, otherwise it behaves like
+        # the environment's concat.
+        rv = concat_events(
+            self._stack[self._depth](self._context), self._context.environment.concat
         )
 
         if self._context.eval_ctx.autoescape:
+            if isinstance(rv, MappedString):
+                return rv.as_markup()  # type: ignore[return-value]
+
             return Markup(rv)
 
         return rv
@@ -773,6 +781,9 @@ class Macro:
         rv = await self._func(*arguments)  # type: ignore
 
         if autoescape:
+            if isinstance(rv, MappedString):
+                return rv.as_markup()
+
             return Markup(rv)
 
         return rv  # type: ignore
@@ -784,6 +795,9 @@ class Macro:
         rv = self._func(*arguments)
 
         if autoescape:
+            if isinstance(rv, MappedString):
+                return rv.as_markup()
+
             rv = Markup(rv)
 
         return rv

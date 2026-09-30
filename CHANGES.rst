@@ -5,6 +5,12 @@ Version 3.2.0
 
 Unreleased
 
+-   Add :meth:`Template.render_with_map`, which renders a template and
+    also returns a source map.  The map records, for each range of
+    output characters, the template name, source line and column range,
+    and macro / include call stack that produced the text.  Templates
+    are compiled separately for this, so regular rendering is
+    unaffected.
 -   Drop support for Python 3.7, 3.8, and 3.9.
 -   Update minimum MarkupSafe version to >= 3.0.
 -   Update minimum Babel version to >= 2.17.
