@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add the ``ext.i18n.untrusted_translations`` policy. When enabled,
+    translated strings are escaped as untrusted text while autoescaping is
+    active instead of being marked safe, covering ``gettext``, ``ngettext``,
+    ``pgettext`` and ``npgettext`` and the ``{% trans %}`` block. Placeholder
+    substitution and parameter escaping still work, and trusted HTML in
+    translations remains available with the policy disabled (the default).
 
 
 Version 3.1.6

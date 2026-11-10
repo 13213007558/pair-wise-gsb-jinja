@@ -4,6 +4,7 @@ import pprint
 import re
 import typing as t
 
+from markupsafe import escape
 from markupsafe import Markup
 
 from . import defaults
@@ -166,12 +167,33 @@ def _gettext_alias(
     return __context.call(__context.resolve("gettext"), *args, **kwargs)
 
 
+def _make_translation_safe(context: Context, rv: t.Any) -> Markup | str:
+    """Return the translated format string with the correct trust level.
+
+    By default translated strings are treated as trusted ``Markup`` when
+    autoescaping is active so that translations may contain HTML. When the
+    ``ext.i18n.untrusted_translations`` policy is enabled, the translation
+    is treated as untrusted text and escaped instead. Only the translation
+    itself is handled here; placeholder substitution still escapes the
+    individual parameters as needed, so valid parameters are never escaped
+    twice.
+    """
+    if not context.eval_ctx.autoescape:
+        return t.cast(str, rv)
+
+    if context.environment.policies.get(
+        "ext.i18n.untrusted_translations", False
+    ):
+        return escape(str(rv))
+
+    return Markup(rv)
+
+
 def _make_new_gettext(func: t.Callable[[str], str]) -> t.Callable[..., str]:
     @pass_context
     def gettext(__context: Context, __string: str, **variables: t.Any) -> str:
         rv = __context.call(func, __string)
-        if __context.eval_ctx.autoescape:
-            rv = Markup(rv)
+        rv = _make_translation_safe(__context, rv)
         # Always treat as a format string, even if there are no
         # variables. This makes translation strings more consistent
         # and predictable. This requires escaping
@@ -191,8 +213,7 @@ def _make_new_ngettext(func: t.Callable[[str, str, int], str]) -> t.Callable[...
     ) -> str:
         variables.setdefault("num", __num)
         rv = __context.call(func, __singular, __plural, __num)
-        if __context.eval_ctx.autoescape:
-            rv = Markup(rv)
+        rv = _make_translation_safe(__context, rv)
         # Always treat as a format string, see gettext comment above.
         return rv % variables  # type: ignore
 
@@ -206,9 +227,7 @@ def _make_new_pgettext(func: t.Callable[[str, str], str]) -> t.Callable[..., str
     ) -> str:
         variables.setdefault("context", __string_ctx)
         rv = __context.call(func, __string_ctx, __string)
-
-        if __context.eval_ctx.autoescape:
-            rv = Markup(rv)
+        rv = _make_translation_safe(__context, rv)
 
         # Always treat as a format string, see gettext comment above.
         return rv % variables  # type: ignore
@@ -231,9 +250,7 @@ def _make_new_npgettext(
         variables.setdefault("context", __string_ctx)
         variables.setdefault("num", __num)
         rv = __context.call(func, __string_ctx, __singular, __plural, __num)
-
-        if __context.eval_ctx.autoescape:
-            rv = Markup(rv)
+        rv = _make_translation_safe(__context, rv)
 
         # Always treat as a format string, see gettext comment above.
         return rv % variables  # type: ignore
@@ -551,9 +568,17 @@ class InternationalizationExtension(Extension):
 
         # otherwise do that here
         else:
-            # mark the return value as safe if we are in an
-            # environment with autoescaping turned on
-            node = nodes.MarkSafeIfAutoescape(node)
+            # By default the return value is marked safe when autoescaping
+            # is active so that translations may contain trusted HTML. When
+            # the untrusted translations policy is enabled it is escaped
+            # instead, so HTML supplied by the translation catalog is
+            # rendered as text.
+            if self.environment.policies.get(
+                "ext.i18n.untrusted_translations", False
+            ):
+                node = nodes.EscapeIfAutoescape(node)
+            else:
+                node = nodes.MarkSafeIfAutoescape(node)
             if variables:
                 node = nodes.Mod(
                     node,

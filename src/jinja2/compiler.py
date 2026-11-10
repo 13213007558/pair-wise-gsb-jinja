@@ -1913,6 +1913,13 @@ class CodeGenerator(NodeVisitor):
         self.visit(node.expr, frame)
         self.write(")")
 
+    def visit_EscapeIfAutoescape(
+        self, node: nodes.EscapeIfAutoescape, frame: Frame
+    ) -> None:
+        self.write("(escape if context.eval_ctx.autoescape else identity)(")
+        self.visit(node.expr, frame)
+        self.write(")")
+
     def visit_EnvironmentAttribute(
         self, node: nodes.EnvironmentAttribute, frame: Frame
     ) -> None:

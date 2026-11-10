@@ -202,6 +202,64 @@ The advantages of newstyle gettext are:
     escaped.
 
 
+.. _i18n-trust:
+
+Translation Trust
+~~~~~~~~~~~~~~~~~
+
+Translation catalogs are often maintained separately from the application,
+sometimes by an external vendor. By default Jinja trusts translated strings:
+when autoescaping is enabled, the result of a translation is marked safe so
+that translations may contain HTML.
+
+If translations are not trusted, enable the
+``ext.i18n.untrusted_translations`` :ref:`policy <policies>`.
+
+.. code-block:: python
+
+    env = Environment(autoescape=True, extensions=["jinja2.ext.i18n"])
+    env.policies["ext.i18n.untrusted_translations"] = True
+
+In this mode the translation format string is handled as untrusted text and
+escaped before placeholder substitution. Placeholders still work normally:
+plain string parameters are escaped once, and parameters already marked as
+:class:`~markupsafe.Markup` are not encoded a second time. The whole
+interpolated result is never re-escaped, so valid parameters keep their
+existing trust level.
+
+.. sourcecode:: jinja
+
+    {# catalog renders: <b>Hello %(name)s</b> #}
+    {{ gettext("...", name="<i>") }}
+
+With the policy disabled (the default) the catalog's ``<b>`` is rendered as
+HTML; with it enabled it appears as the literal text ``&lt;b&gt;``. The
+parameter ``<i>`` is escaped to ``&lt;i&gt;`` in both cases.
+
+The mode covers ``gettext``, ``ngettext`` and the context-aware ``pgettext``
+and ``npgettext`` variants. How it applies depends on how the translation is
+used:
+
+-   **New style gettext calls** (``newstyle_gettext`` enabled): the wrapper
+    escapes the translated format string instead of marking it safe, then
+    performs the normal placeholder substitution.
+-   **``{% trans %}`` blocks**: the translated block is escaped instead of
+    marked safe, for both the old and new style gettext configurations,
+    including plural and context variants.
+-   **Old style function calls** with the ``|format`` filter return a plain
+    string, so normal output escaping already neutralizes any HTML in the
+    translation regardless of this policy.
+
+The policy defaults to `False`, so the existing behavior of allowing trusted
+HTML in translations remains available and opt-in projects are unaffected.
+
+The policy only changes behavior while autoescaping is active. If
+autoescaping is disabled, enabling it does not provide HTML safety on its
+own: translated HTML and unescaped parameters are still rendered raw. Enable
+autoescaping for the templates involved to get the protection described
+above.
+
+
 Expression Statement
 --------------------
 

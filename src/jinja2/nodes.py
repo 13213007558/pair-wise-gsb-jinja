@@ -8,6 +8,7 @@ import operator
 import typing as t
 from collections import deque
 
+from markupsafe import escape
 from markupsafe import Markup
 
 from .utils import _PassArg
@@ -1104,6 +1105,29 @@ class MarkSafeIfAutoescape(Expr):
         expr = self.expr.as_const(eval_ctx)
         if eval_ctx.autoescape:
             return Markup(expr)
+        return expr
+
+
+class EscapeIfAutoescape(Expr):
+    """Escape the wrapped expression (with :func:`markupsafe.escape`)
+    but only if autoescaping is active.
+
+    Unlike :class:`MarkSafeIfAutoescape`, this treats the wrapped value
+    as untrusted text so that any HTML it contains is rendered instead of
+    interpreted. Used when the ``ext.i18n.untrusted_translations`` policy
+    is enabled.
+    """
+
+    fields = ("expr",)
+    expr: Expr
+
+    def as_const(self, eval_ctx: EvalContext | None = None) -> Markup | t.Any:
+        eval_ctx = get_eval_context(self, eval_ctx)
+        if eval_ctx.volatile:
+            raise Impossible()
+        expr = self.expr.as_const(eval_ctx)
+        if eval_ctx.autoescape:
+            return escape(str(expr))
         return expr
 
 

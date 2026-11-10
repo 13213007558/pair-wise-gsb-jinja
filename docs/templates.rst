@@ -1826,6 +1826,13 @@ easier. Formatting is part of the ``gettext`` call instead of using the
 The ``ngettext`` function's format string automatically receives the
 count as a ``num`` parameter in addition to the given parameters.
 
+If the translation catalog is maintained by an untrusted party and should
+not be able to inject HTML, enable the
+``ext.i18n.untrusted_translations`` policy. Translated strings are then
+escaped while placeholder substitution and parameter escaping keep
+working; see :ref:`i18n-trust` for the details and the autoescaping
+requirements.
+
 
 Expression Statement
 ~~~~~~~~~~~~~~~~~~~~

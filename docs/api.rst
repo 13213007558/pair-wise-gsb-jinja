@@ -584,6 +584,16 @@ Example::
     :ref:`i18n-extension` will always unify linebreaks and surrounding
     whitespace as if the `trimmed` modifier was used.
 
+.. _ext-i18n-untrusted-translations:
+
+``ext.i18n.untrusted_translations``:
+    If this is set to `True`, translated strings are treated as untrusted
+    text when autoescaping is active. Any HTML contained in a translation is
+    escaped instead of being rendered, while placeholder substitution and
+    parameter escaping keep working. When `False` (the default),
+    translations are trusted and may contain HTML. This only has an effect
+    while autoescaping is enabled; see :ref:`i18n-trust` for details.
+
 
 Utilities
 ---------

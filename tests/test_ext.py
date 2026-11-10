@@ -2,6 +2,7 @@ import re
 from io import BytesIO
 
 import pytest
+from markupsafe import Markup
 
 from jinja2 import DictLoader
 from jinja2 import Environment
@@ -621,6 +622,274 @@ class TestNewstyleInternationalization:
         tmpl = newstyle_i18n_env.get_template("npgettext_block")
         assert tmpl.render(LANGUAGE="de", apples=1) == "1 Apple"
         assert tmpl.render(LANGUAGE="de", apples=5) == "5 Apples"
+
+
+# A translation catalog controlled by an untrusted "vendor". Every message
+# contains HTML or a literal percent sign so the difference between trusting
+# and escaping translation text shows up in the final output.
+untrusted_catalog = {
+    "greet": '<img src=x onerror=alert(1)>Hello %(name)s',
+    "greet_percent": "100%% done %(name)s",
+    "one": '<b>%(num)s</b> apple',
+    "other": '<b>%(num)s</b> apples',
+    "percent": "100%% done",
+    "missing": "Hello %(nope)s",
+}
+
+
+def _make_untrusted_env(*, untrusted, newstyle, autoescape=True):
+    env = Environment(
+        autoescape=autoescape, extensions=["jinja2.ext.i18n"]
+    )
+    env.policies["ext.i18n.untrusted_translations"] = untrusted
+
+    def gettext(message):
+        return untrusted_catalog.get(message, message)
+
+    def ngettext(singular, plural, n):
+        key = singular if n == 1 else plural
+        return untrusted_catalog.get(key, key)
+
+    env.install_gettext_callables(
+        gettext,
+        ngettext,
+        newstyle=newstyle,
+        pgettext=lambda context, message: gettext(message),
+        npgettext=lambda context, singular, plural, n: ngettext(
+            singular, plural, n
+        ),
+    )
+    return env
+
+
+class TestUntrustedTranslations:
+    """The same vendor-controlled catalog is rendered with the policy on and
+    off. HTML coming from a translation is rendered as text only when
+    translations are treated as untrusted. Placeholder substitution and
+    parameter escaping keep working, and valid parameters are never encoded
+    twice.
+    """
+
+    malicious = '<img src=x onerror=alert(1)>Hello &lt;i&gt;'
+    escaped = "&lt;img src=x onerror=alert(1)&gt;Hello &lt;i&gt;"
+
+    def test_newstyle_malicious_tag(self):
+        trusted = _make_untrusted_env(untrusted=False, newstyle=True)
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=True)
+        source = '{{ gettext("greet", name=name) }}'
+
+        # Trusted default: the translation may contain HTML and is kept.
+        assert trusted.from_string(source).render(name="<i>") == self.malicious
+        # Untrusted mode: the same catalog can no longer inject HTML.
+        assert untrusted.from_string(source).render(name="<i>") == self.escaped
+
+    def test_newstyle_plain_and_markup_parameters(self):
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=True)
+        trusted = _make_untrusted_env(untrusted=False, newstyle=True)
+        source = '{{ gettext("greet", name=name) }}'
+
+        # A plain string parameter is escaped once, even though the whole
+        # translation string is escaped too.
+        assert untrusted.from_string(source).render(name="<i>") == self.escaped
+
+        # An already escaped Markup parameter must not be encoded again.
+        assert untrusted.from_string(source).render(name=Markup("<i>")) == (
+            "&lt;img src=x onerror=alert(1)&gt;Hello <i>"
+        )
+        assert trusted.from_string(source).render(name=Markup("<i>")) == (
+            '<img src=x onerror=alert(1)>Hello <i>'
+        )
+
+    def test_oldstyle_function_call_is_output_escaped(self):
+        # An old-style function call plus the ``format`` filter returns a
+        # plain string, which normal output escaping handles. Both policies
+        # therefore escape the vendor HTML; the policy changes only the
+        # ``{% trans %}`` block and newstyle paths.
+        trusted = _make_untrusted_env(untrusted=False, newstyle=False)
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=False)
+        source = '{{ gettext("greet")|format(name=name) }}'
+
+        for env in (trusted, untrusted):
+            assert env.from_string(source).render(name="<i>") == self.escaped
+
+        # The old-style format filter works on plain strings, so even a
+        # Markup parameter is encoded by output escaping. This is pre-existing
+        # behavior of the function-call path, independent of the new policy.
+        assert untrusted.from_string(source).render(name=Markup("<i>")) == (
+            "&lt;img src=x onerror=alert(1)&gt;Hello &lt;i&gt;"
+        )
+
+    @pytest.mark.parametrize("newstyle", [False, True])
+    def test_trans_block_malicious_tag(self, newstyle):
+        trusted = _make_untrusted_env(untrusted=False, newstyle=newstyle)
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=newstyle)
+        source = (
+            "{% trans name=name %}"
+            '<img src=x onerror=alert(1)>Hello {{ name }}'
+            "{% endtrans %}"
+        )
+
+        assert trusted.from_string(source).render(name="<i>") == self.malicious
+        assert untrusted.from_string(source).render(name="<i>") == self.escaped
+
+    @pytest.mark.parametrize("newstyle", [False, True])
+    def test_trans_block_markup_parameter(self, newstyle):
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=newstyle)
+        source = (
+            "{% trans name=name %}"
+            '<img src=x onerror=alert(1)>Hello {{ name }}'
+            "{% endtrans %}"
+        )
+        # The translation is escaped but the trusted parameter survives.
+        assert untrusted.from_string(source).render(name=Markup("<i>")) == (
+            "&lt;img src=x onerror=alert(1)&gt;Hello <i>"
+        )
+
+    def test_literal_percent_sign(self):
+        # New style always formats, so a literal ``%%`` supplied by the
+        # catalog renders as a single ``%``.
+        newstyle = _make_untrusted_env(untrusted=True, newstyle=True)
+        assert newstyle.from_string('{{ gettext("percent") }}').render() == (
+            "100% done"
+        )
+
+        # Old style without variables skips formatting, so the catalog's
+        # literal ``%%`` is passed through untouched (the output escaping
+        # only affects HTML).
+        oldstyle = _make_untrusted_env(untrusted=True, newstyle=False)
+        assert oldstyle.from_string('{{ gettext("percent") }}').render() == (
+            "100%% done"
+        )
+
+        # With a placeholder the catalog string is always formatted, in both
+        # gettext styles and both trust policies, so ``%%`` becomes ``%`` and
+        # the variable still substitutes normally.
+        for newstyle in (False, True):
+            for untrusted in (False, True):
+                env = _make_untrusted_env(
+                    untrusted=untrusted, newstyle=newstyle
+                )
+                if newstyle:
+                    source = '{{ gettext("greet_percent", name=name) }}'
+                else:
+                    source = (
+                        '{{ gettext("greet_percent")|format(name=name) }}'
+                    )
+                assert env.from_string(source).render(name="x") == (
+                    "100% done x"
+                )
+
+    def test_missing_placeholder_raises(self):
+        # New style raises when the catalog references an unknown placeholder.
+        for untrusted in (False, True):
+            env = _make_untrusted_env(untrusted=untrusted, newstyle=True)
+            with pytest.raises(KeyError):
+                env.from_string('{{ gettext("missing") }}').render()
+
+        # The old-style trans block formats too once a variable is present.
+        # If the catalog rewrites the message to reference an unknown
+        # placeholder, formatting still raises, in both trust policies.
+        for untrusted in (False, True):
+            env = _make_untrusted_env(untrusted=untrusted, newstyle=False)
+            env.globals["gettext"] = lambda message: untrusted_catalog[
+                "missing"
+            ]
+            source = "{% trans name=name %}Hello {{ name }}{% endtrans %}"
+            with pytest.raises(KeyError):
+                env.from_string(source).render(name="x")
+
+    def test_newstyle_plural_branches(self):
+        trusted = _make_untrusted_env(untrusted=False, newstyle=True)
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=True)
+        source = '{{ ngettext("one", "other", count) }}'
+
+        assert trusted.from_string(source).render(count=1) == "<b>1</b> apple"
+        assert untrusted.from_string(source).render(count=1) == (
+            "&lt;b&gt;1&lt;/b&gt; apple"
+        )
+        assert trusted.from_string(source).render(count=5) == (
+            "<b>5</b> apples"
+        )
+        assert untrusted.from_string(source).render(count=5) == (
+            "&lt;b&gt;5&lt;/b&gt; apples"
+        )
+
+    @pytest.mark.parametrize("newstyle", [False, True])
+    def test_plural_trans_block_branches(self, newstyle):
+        trusted = _make_untrusted_env(untrusted=False, newstyle=newstyle)
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=newstyle)
+        source = (
+            "{% trans num=count %}"
+            "<b>{{ num }}</b> apple"
+            "{% pluralize %}"
+            "<b>{{ num }}</b> apples"
+            "{% endtrans %}"
+        )
+
+        assert trusted.from_string(source).render(count=1) == "<b>1</b> apple"
+        assert untrusted.from_string(source).render(count=1) == (
+            "&lt;b&gt;1&lt;/b&gt; apple"
+        )
+        assert trusted.from_string(source).render(count=5) == (
+            "<b>5</b> apples"
+        )
+        assert untrusted.from_string(source).render(count=5) == (
+            "&lt;b&gt;5&lt;/b&gt; apples"
+        )
+
+    def test_context_variants(self):
+        trusted = _make_untrusted_env(untrusted=False, newstyle=True)
+        untrusted = _make_untrusted_env(untrusted=True, newstyle=True)
+
+        source = '{{ pgettext("c", "greet", name=name) }}'
+        assert trusted.from_string(source).render(name="<i>") == self.malicious
+        assert untrusted.from_string(source).render(name="<i>") == self.escaped
+
+        plural_source = '{{ npgettext("c", "one", "other", count) }}'
+        assert untrusted.from_string(plural_source).render(count=2) == (
+            "&lt;b&gt;2&lt;/b&gt; apples"
+        )
+
+        block_source = (
+            '{% trans "c" name=name %}'
+            '<img src=x onerror=alert(1)>Hello {{ name }}'
+            "{% endtrans %}"
+        )
+        for newstyle in (False, True):
+            trusted = _make_untrusted_env(untrusted=False, newstyle=newstyle)
+            untrusted = _make_untrusted_env(untrusted=True, newstyle=newstyle)
+            assert trusted.from_string(block_source).render(name="<i>") == (
+                self.malicious
+            )
+            assert untrusted.from_string(block_source).render(name="<i>") == (
+                self.escaped
+            )
+
+    @pytest.mark.parametrize("newstyle", [False, True])
+    def test_autoescape_off_is_not_made_safe(self, newstyle):
+        # With autoescape disabled the policy alone does not provide HTML
+        # safety: the vendor tag and the unescaped parameter reach the output
+        # raw. This option only changes how translations are handled while
+        # autoescaping is active.
+        env = _make_untrusted_env(
+            untrusted=True, newstyle=newstyle, autoescape=False
+        )
+        if newstyle:
+            source = '{{ gettext("greet", name=name) }}'
+        else:
+            source = (
+                "{% trans name=name %}"
+                '<img src=x onerror=alert(1)>Hello {{ name }}'
+                "{% endtrans %}"
+            )
+
+        assert env.from_string(source).render(name="<i>") == (
+            '<img src=x onerror=alert(1)>Hello <i>'
+        )
+
+    def test_policy_defaults_to_trusted(self):
+        env = Environment(autoescape=True, extensions=["jinja2.ext.i18n"])
+        assert env.policies["ext.i18n.untrusted_translations"] is False
 
 
 class TestAutoEscape:
