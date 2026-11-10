@@ -12,6 +12,7 @@ from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache
 from .environment import Environment as Environment
 from .environment import Template as Template
+from .exceptions import TemplateAccessDenied as TemplateAccessDenied
 from .exceptions import TemplateAssertionError as TemplateAssertionError
 from .exceptions import TemplateError as TemplateError
 from .exceptions import TemplateNotFound as TemplateNotFound
@@ -29,7 +30,9 @@ from .loaders import PackageLoader as PackageLoader
 from .loaders import PrefixLoader as PrefixLoader
 from .runtime import ChainableUndefined as ChainableUndefined
 from .runtime import DebugUndefined as DebugUndefined
+from .runtime import get_render_identity as get_render_identity
 from .runtime import make_logging_undefined as make_logging_undefined
+from .runtime import render_identity as render_identity
 from .runtime import StrictUndefined as StrictUndefined
 from .runtime import Undefined as Undefined
 from .utils import clear_caches as clear_caches

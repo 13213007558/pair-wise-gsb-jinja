@@ -34,6 +34,7 @@ from .defaults import NEWLINE_SEQUENCE
 from .defaults import TRIM_BLOCKS
 from .defaults import VARIABLE_END_STRING
 from .defaults import VARIABLE_START_STRING
+from .exceptions import TemplateAccessDenied
 from .exceptions import TemplateNotFound
 from .exceptions import TemplateRuntimeError
 from .exceptions import TemplatesNotFound
@@ -45,6 +46,7 @@ from .lexer import TokenStream
 from .nodes import EvalContext
 from .parser import Parser
 from .runtime import Context
+from .runtime import get_render_identity
 from .runtime import new_context
 from .runtime import Undefined
 from .utils import _PassArg
@@ -140,6 +142,17 @@ def _environment_config_check(environment: _env_bound) -> _env_bound:
         "\n",
     }, "'newline_sequence' must be one of '\\n', '\\r\\n', or '\\r'."
     return environment
+
+
+#: The signature of a callable used as
+#: :attr:`Environment.template_load_policy`. It is called with the
+#: current render identity (see :func:`~jinja2.runtime.render_identity`),
+#: the name of the template that loads the dependency (``None`` for
+#: direct loads), the resolved name of the template being loaded, and
+#: the purpose of the load (``"extends"``, ``"include"``, ``"import"``,
+#: or ``"load"``). Returning ``False`` denies the load and raises
+#: :exc:`~jinja2.exceptions.TemplateAccessDenied`.
+TemplateLoadPolicy = t.Callable[[t.Any, str | None, str | None, str], bool]
 
 
 class Environment:
@@ -262,6 +275,24 @@ class Environment:
         `enable_async`
             If set to true this enables async template execution which
             allows using async functions and generators.
+
+        `template_load_policy`
+            An optional callable that authorizes template dependencies
+            loaded at render time through ``{% extends %}``,
+            ``{% include %}``, and ``{% import %}``, as well as direct
+            loads through :meth:`get_template`. It is called with the
+            current render identity (see
+            :func:`~jinja2.runtime.render_identity`), the name of the
+            template that loads the dependency, the resolved name of
+            the template being loaded, and the purpose of the load, and
+            must return ``True`` to allow the load. If it returns
+            ``False``, :exc:`~jinja2.exceptions.TemplateAccessDenied`
+            is raised before the template is executed or its content
+            is output. The check is performed for every load, even if
+            the compiled template is already cached or the template
+            object already exists.
+
+            .. versionadded:: 3.2
     """
 
     #: if this environment is sandboxed.  Modifying this variable won't make
@@ -316,6 +347,7 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        template_load_policy: TemplateLoadPolicy | None = None,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -358,6 +390,9 @@ class Environment:
         self.cache = create_cache(cache_size)
         self.bytecode_cache = bytecode_cache
         self.auto_reload = auto_reload
+
+        # render-time authorization for template dependencies
+        self.template_load_policy = template_load_policy
 
         # configurable policies
         self.policies = DEFAULT_POLICIES.copy()
@@ -408,6 +443,7 @@ class Environment:
         auto_reload: bool = missing,
         bytecode_cache: t.Optional["BytecodeCache"] = missing,
         enable_async: bool = missing,
+        template_load_policy: TemplateLoadPolicy | None = missing,
     ) -> "te.Self":
         """Create a new overlay environment that shares all the data with the
         current environment except for cache and the overridden attributes.
@@ -952,12 +988,37 @@ class Environment:
         """
         return template
 
+    def _authorize_template_load(
+        self, name: str | None, parent: str | None, purpose: str
+    ) -> None:
+        """Check :attr:`template_load_policy` for a template that is
+        about to be loaded. Raises
+        :exc:`~jinja2.exceptions.TemplateAccessDenied` if the policy
+        denies the load. This runs for every load, before any cache
+        lookup, so cached or existing template objects cannot bypass
+        authorization.
+
+        .. versionadded:: 3.2
+        """
+        policy = self.template_load_policy
+
+        if policy is None:
+            return
+
+        if not policy(get_render_identity(), parent, name, purpose):
+            raise TemplateAccessDenied(name, parent, purpose)
+
     @internalcode
     def _load_template(
-        self, name: str, globals: t.MutableMapping[str, t.Any] | None
+        self,
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None,
+        parent: str | None = None,
+        purpose: str = "load",
     ) -> "Template":
         if self.loader is None:
             raise TypeError("no loader for this environment specified")
+        self._authorize_template_load(name, parent, purpose)
         cache_key = (weakref.ref(self.loader), name)
         if self.cache is not None:
             template = self.cache.get(cache_key)
@@ -983,6 +1044,8 @@ class Environment:
         name: t.Union[str, "Template"],
         parent: str | None = None,
         globals: t.MutableMapping[str, t.Any] | None = None,
+        *,
+        purpose: str = "load",
     ) -> "Template":
         """Load a template by name with :attr:`loader` and return a
         :class:`Template`. If the template does not exist a
@@ -998,6 +1061,16 @@ class Environment:
             these extra variables available for all renders of this
             template. If the template has already been loaded and
             cached, its globals are updated with any new items.
+        :param purpose: How the template will be used, one of
+            ``"extends"``, ``"include"``, ``"import"``, or ``"load"``.
+            Passed to :attr:`template_load_policy` if one is
+            configured.
+
+        .. versionchanged:: 3.2
+            Added the ``purpose`` parameter. If a
+            :attr:`template_load_policy` is configured, it is consulted
+            for every load, including cached templates and templates
+            passed as :class:`Template` objects.
 
         .. versionchanged:: 3.0
             If a template is loaded from cache, ``globals`` will update
@@ -1008,11 +1081,12 @@ class Environment:
             unchanged.
         """
         if isinstance(name, Template):
+            self._authorize_template_load(name.name, parent, purpose)
             return name
         if parent is not None:
             name = self.join_path(name, parent)
 
-        return self._load_template(name, globals)
+        return self._load_template(name, globals, parent, purpose)
 
     @internalcode
     def select_template(
@@ -1020,6 +1094,8 @@ class Environment:
         names: t.Iterable[t.Union[str, "Template"]],
         parent: str | None = None,
         globals: t.MutableMapping[str, t.Any] | None = None,
+        *,
+        purpose: str = "load",
     ) -> "Template":
         """Like :meth:`get_template`, but tries loading multiple names.
         If none of the names can be loaded a :exc:`TemplatesNotFound`
@@ -1033,6 +1109,17 @@ class Environment:
             these extra variables available for all renders of this
             template. If the template has already been loaded and
             cached, its globals are updated with any new items.
+        :param purpose: How the template will be used, one of
+            ``"extends"``, ``"include"``, ``"import"``, or ``"load"``.
+            Passed to :attr:`template_load_policy` if one is
+            configured.
+
+        .. versionchanged:: 3.2
+            Added the ``purpose`` parameter. If a
+            :attr:`template_load_policy` denies a candidate,
+            :exc:`~jinja2.exceptions.TemplateAccessDenied` is raised
+            immediately instead of trying the next candidate: a denied
+            template is not treated as a missing one.
 
         .. versionchanged:: 3.0
             If a template is loaded from cache, ``globals`` will update
@@ -1059,11 +1146,12 @@ class Environment:
 
         for name in names:
             if isinstance(name, Template):
+                self._authorize_template_load(name.name, parent, purpose)
                 return name
             if parent is not None:
                 name = self.join_path(name, parent)
             try:
-                return self._load_template(name, globals)
+                return self._load_template(name, globals, parent, purpose)
             except (TemplateNotFound, UndefinedError):
                 pass
         raise TemplatesNotFound(names)  # type: ignore
@@ -1074,17 +1162,28 @@ class Environment:
         template_name_or_list: t.Union[str, "Template", list[t.Union[str, "Template"]]],
         parent: str | None = None,
         globals: t.MutableMapping[str, t.Any] | None = None,
+        *,
+        purpose: str = "load",
     ) -> "Template":
         """Use :meth:`select_template` if an iterable of template names
         is given, or :meth:`get_template` if one name is given.
 
+        .. versionchanged:: 3.2
+            Added the ``purpose`` parameter, passed to
+            :meth:`get_template` or :meth:`select_template`.
+
         .. versionadded:: 2.3
         """
         if isinstance(template_name_or_list, (str, Undefined)):
-            return self.get_template(template_name_or_list, parent, globals)
+            return self.get_template(
+                template_name_or_list, parent, globals, purpose=purpose
+            )
         elif isinstance(template_name_or_list, Template):
+            self._authorize_template_load(template_name_or_list.name, parent, purpose)
             return template_name_or_list
-        return self.select_template(template_name_or_list, parent, globals)
+        return self.select_template(
+            template_name_or_list, parent, globals, purpose=purpose
+        )
 
     def from_string(
         self,

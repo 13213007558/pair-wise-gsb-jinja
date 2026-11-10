@@ -1,9 +1,11 @@
 """The runtime functions and state used by compiled templates."""
 
+import contextvars
 import functools
 import sys
 import typing as t
 from collections import abc
+from contextlib import contextmanager
 from itertools import chain
 
 from markupsafe import escape  # noqa: F401
@@ -26,6 +28,51 @@ from .utils import pass_eval_context
 
 V = t.TypeVar("V")
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
+
+#: The trusted render identity the application bound to the current
+#: execution context with :func:`render_identity`. Stored in a
+#: :class:`~contextvars.ContextVar` so that every render, sync or async,
+#: sees the identity of its own execution context rather than a mutable
+#: field on the shared environment.
+_render_identity: contextvars.ContextVar[t.Any] = contextvars.ContextVar(
+    "jinja2_render_identity", default=None
+)
+
+
+def get_render_identity() -> t.Any:
+    """Return the render identity bound to the current execution context
+    with :func:`render_identity`, or ``None`` if no identity is bound.
+
+    .. versionadded:: 3.2
+    """
+    return _render_identity.get()
+
+
+@contextmanager
+def render_identity(identity: t.Any) -> t.Iterator[None]:
+    """Bind a trusted render *identity* to the current execution context.
+    While the context manager is active, the environment's
+    :attr:`~jinja2.Environment.template_load_policy` is consulted with
+    this identity for every template dependency a render loads through
+    ``{% extends %}``, ``{% include %}``, and ``{% import %}``.
+
+    The identity is kept in a :class:`~contextvars.ContextVar`, so each
+    thread or async task keeps its own identity for its own renders. It
+    is never stored on the shared environment. Keep the block open while
+    consuming iterators returned by :meth:`Template.generate` or
+    :meth:`Template.stream`, as rendering happens during iteration::
+
+        with render_identity("public"):
+            template.render()
+
+    .. versionadded:: 3.2
+    """
+    token = _render_identity.set(identity)
+    try:
+        yield
+    finally:
+        _render_identity.reset(token)
+
 
 if t.TYPE_CHECKING:
     import logging

@@ -601,6 +601,10 @@ functions to a Jinja environment.
 
 .. autofunction:: jinja2.is_undefined
 
+.. autofunction:: jinja2.render_identity
+
+.. autofunction:: jinja2.get_render_identity
+
 
 Exceptions
 ----------
@@ -635,6 +639,8 @@ Exceptions
 .. autoexception:: jinja2.TemplateRuntimeError
 
 .. autoexception:: jinja2.TemplateAssertionError
+
+.. autoexception:: jinja2.TemplateAccessDenied
 
 
 .. _writing-filters:

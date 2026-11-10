@@ -13,6 +13,14 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add optional render-time authorization for template dependencies.
+    ``Environment(template_load_policy=...)`` is consulted with the
+    trusted identity bound by ``jinja2.render_identity`` whenever
+    ``{% extends %}``, ``{% include %}``, or ``{% import %}`` loads a
+    template, and raises ``TemplateAccessDenied`` if the policy refuses.
+    Cached or existing template objects cannot bypass the check, and a
+    denial is not treated as a missing template by ``ignore missing``
+    or candidate lists.
 
 
 Version 3.1.6

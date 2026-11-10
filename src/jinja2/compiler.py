@@ -1018,7 +1018,7 @@ class CodeGenerator(NodeVisitor):
 
         self.writeline("parent_template = environment.get_template(", node)
         self.visit(node.template, frame)
-        self.write(f", {self.name!r})")
+        self.write(f', {self.name!r}, purpose="extends")')
         self.writeline("for name, parent_block in parent_template.blocks.items():")
         self.indent()
         self.writeline("context.blocks.setdefault(name, []).append(parent_block)")
@@ -1050,7 +1050,7 @@ class CodeGenerator(NodeVisitor):
 
         self.writeline(f"template = environment.{func_name}(", node)
         self.visit(node.template, frame)
-        self.write(f", {self.name!r})")
+        self.write(f', {self.name!r}, purpose="include")')
         if node.ignore_missing:
             self.outdent()
             self.writeline("except TemplateNotFound:")
@@ -1096,7 +1096,7 @@ class CodeGenerator(NodeVisitor):
     ) -> None:
         self.write(f"{self.choose_async('await ')}environment.get_template(")
         self.visit(node.template, frame)
-        self.write(f", {self.name!r}).")
+        self.write(f', {self.name!r}, purpose="import").')
 
         if node.with_context:
             f_name = f"make_module{self.choose_async('_async')}"

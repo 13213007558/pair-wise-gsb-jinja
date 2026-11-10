@@ -160,6 +160,43 @@ class SecurityError(TemplateRuntimeError):
     """
 
 
+class TemplateAccessDenied(SecurityError):
+    """Raised when the environment's
+    :attr:`~jinja2.Environment.template_load_policy` refuses to load a
+    template dependency at render time.
+
+    This is deliberately *not* a subclass of :exc:`TemplateNotFound`:
+    a denied template is not "missing", so it must not be skipped by
+    ``ignore missing`` or cause :meth:`~jinja2.Environment.select_template`
+    to try the next candidate.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(
+        self,
+        name: str | None,
+        parent: str | None = None,
+        purpose: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        if message is None:
+            message = f"loading template {name!r} was denied"
+
+            if purpose is not None:
+                message += f" (used for {purpose!r}"
+
+                if parent is not None:
+                    message += f" by template {parent!r}"
+
+                message += ")"
+
+        super().__init__(message)
+        self.name = name
+        self.parent = parent
+        self.purpose = purpose
+
+
 class FilterArgumentError(TemplateRuntimeError):
     """This error is raised if a filter was called with inappropriate
     arguments
