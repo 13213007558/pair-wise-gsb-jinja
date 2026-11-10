@@ -270,6 +270,17 @@ class Environment:
     #: generation by the compiler.
     sandboxed = False
 
+    #: An explicit, stable namespace added to every bytecode cache key of
+    #: templates compiled by this environment.  Use it when code generation is
+    #: customized in a way Jinja cannot detect itself, such as a custom
+    #: :attr:`code_generator_class`, a custom ``_compile`` hook, or changed
+    #: compiler policies.  Set a distinct, human-chosen value on every
+    #: environment whose generated code may differ; never rely on object
+    #: identity or ``repr()``, which change between processes.  This is mixed
+    #: into the key together with the settings Jinja tracks automatically
+    #: (:meth:`get_cache_namespace`).
+    cache_namespace: str | None = None
+
     #: True if the environment is just an overlay
     overlayed = False
 
@@ -316,6 +327,7 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        cache_namespace: str | None = None,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -366,6 +378,8 @@ class Environment:
         self.extensions = load_extensions(self, extensions)
 
         self.is_async = enable_async
+        if cache_namespace is not None:
+            self.cache_namespace = cache_namespace
         _environment_config_check(self)
 
     def add_extension(self, extension: str | type["Extension"]) -> None:
@@ -408,6 +422,7 @@ class Environment:
         auto_reload: bool = missing,
         bytecode_cache: t.Optional["BytecodeCache"] = missing,
         enable_async: bool = missing,
+        cache_namespace: str | None = missing,
     ) -> "te.Self":
         """Create a new overlay environment that shares all the data with the
         current environment except for cache and the overridden attributes.
@@ -698,6 +713,45 @@ class Environment:
             defer_init=defer_init,
             optimized=self.optimized,
         )
+
+    def get_cache_namespace(self) -> str:
+        """Return the stable namespace that identifies this environment's
+        compile settings within a shared bytecode cache.
+
+        Every setting that changes the code emitted by the compiler is part of
+        the namespace, so two environments that compile the same template to
+        different bytecode never resolve to the same cache entry:
+
+        -   ``sandboxed`` controls whether sandbox checks are generated.
+        -   ``is_async`` controls whether async code is generated.
+        -   the intercepted binary and unary operators change which operator
+            calls are routed through the sandbox callbacks.
+        -   the code generator class identifies built-in generators such as
+            :class:`~jinja2.nativetypes.NativeCodeGenerator`.
+        -   an explicit :attr:`cache_namespace` covers custom generators,
+            custom ``_compile`` hooks and compiler policies Jinja cannot
+            detect automatically.
+
+        Only process-independent values (strings, booleans and sorted tuples)
+        are used. Object identity, ``id()`` and ``repr()`` are deliberately
+        avoided because they are not stable across processes and therefore
+        cannot serve as persistent cache keys. Subclasses may override this
+        method, but must keep the result deterministic; the recommended way to
+        add custom distinctions is setting :attr:`cache_namespace`.
+        """
+        generator = self.code_generator_class
+        parts = [
+            f"sandboxed={int(self.sandboxed)}",
+            f"async={int(self.is_async)}",
+            f"generator={generator.__module__}.{generator.__qualname__}",
+            f"binops={tuple(sorted(getattr(self, 'intercepted_binops', ())))!r}",
+            f"unops={tuple(sorted(getattr(self, 'intercepted_unops', ())))!r}",
+        ]
+
+        if self.cache_namespace is not None:
+            parts.append(f"custom={self.cache_namespace}")
+
+        return "|".join(parts)
 
     def _compile(self, source: str, filename: str) -> CodeType:
         """Internal hook that can be overridden to hook a different compile

@@ -13,6 +13,16 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Bytecode cache keys include a namespace derived from the environment's
+    compile settings, including sandbox mode, async mode, the intercepted
+    binary and unary operators, and the code generator class. A regular and a
+    sandboxed environment (or environments with different operator
+    interception) sharing one cache no longer reuse each other's bytecode, so
+    the sandbox cannot run code compiled without its security checks. Set the
+    new ``cache_namespace`` option for custom code generators or other
+    compilation customizations Jinja cannot detect automatically. The bytecode
+    cache format version is bumped, so entries written by older versions are
+    ignored rather than reused under the new keys.
 
 
 Version 3.1.6

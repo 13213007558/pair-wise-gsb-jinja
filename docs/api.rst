@@ -82,7 +82,15 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 .. autoclass:: Environment([options])
     :members: from_string, get_template, select_template,
               get_or_select_template, join_path, extend, compile_expression,
-              compile_templates, list_templates, add_extension
+              compile_templates, list_templates, add_extension,
+              get_cache_namespace
+
+    .. attribute:: cache_namespace
+
+        A stable, explicit string mixed into the bytecode cache key alongside
+        the automatically tracked compile settings. Set it when using a custom
+        code generator or other customizations that change generated code in a
+        way Jinja cannot detect. See :ref:`bytecode-cache`.
 
     .. attribute:: shared
 
@@ -472,8 +480,34 @@ the application.
 
 To use a bytecode cache, instantiate it and pass it to the :class:`Environment`.
 
+Cache entries are namespaced by the compile settings of the environment that
+created them. A regular :class:`Environment` and a
+:class:`~jinja2.sandbox.SandboxedEnvironment`, sync and async environments, and
+sandboxes with different intercepted operator sets each get their own entries,
+even when they share one cache and load the same template. This prevents an
+environment from reusing bytecode generated without the security checks its
+own settings require. The namespace is produced by
+:meth:`Environment.get_cache_namespace` and is built only from stable values,
+never from object identity or memory addresses.
+
+If code generation is customized in a way Jinja cannot detect itself — a custom
+:attr:`~Environment.code_generator_class`, a custom ``_compile`` hook, or a
+changed compiler policy — set a distinct, stable ``cache_namespace`` on every
+environment whose generated code may differ:
+
+.. code-block:: python
+
+    env = Environment(loader=loader, bytecode_cache=cache,
+                      cache_namespace="my-generator-v1")
+
+A bytecode cache stores executable Python code. It is a trusted code carrier,
+not a security boundary: only use a cache location (directory, memcached
+bucket, ...) that is writable and readable exclusively by trusted parties.
+Namespace isolation keeps *your own* environments from mixing each other's
+bytecode; it does not make it safe to load a cache file produced by an attacker.
+
 .. autoclass:: jinja2.BytecodeCache
-    :members: load_bytecode, dump_bytecode, clear
+    :members: load_bytecode, dump_bytecode, clear, get_cache_key
 
 .. autoclass:: jinja2.bccache.Bucket
     :members: write_bytecode, load_bytecode, bytecode_from_string,

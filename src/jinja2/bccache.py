@@ -30,10 +30,16 @@ if t.TYPE_CHECKING:
         def set(self, key: str, value: bytes, timeout: int | None = None) -> None: ...
 
 
-bc_version = 5
+bc_version = 6
 # Magic bytes to identify Jinja bytecode cache files. Contains the
 # Python major and minor version to avoid loading incompatible bytecode
 # if a project upgrades its Python version.
+#
+# The version is part of the on-disk format and must be bumped whenever the
+# layout of a cache entry changes. Bumping it also makes cache entries written
+# by older Jinja versions fail the magic check, so bytecode compiled without a
+# compile-settings namespace can never be silently reused under the new,
+# security-aware keys.
 bc_magic = (
     b"j2"
     + pickle.dumps(bc_version, 2)
@@ -147,12 +153,28 @@ class BytecodeCache:
         by a particular environment.
         """
 
-    def get_cache_key(self, name: str, filename: str | None = None) -> str:
-        """Returns the unique hash key for this template name."""
+    def get_cache_key(
+        self,
+        name: str,
+        filename: str | None = None,
+        namespace: str | None = None,
+    ) -> str:
+        """Returns the unique hash key for this template name.
+
+        The ``namespace`` identifies the compile settings of the environment
+        that owns the entry. It is mixed into the key so that environments
+        whose settings generate different code (for example a regular versus
+        a :class:`~jinja2.sandbox.SandboxedEnvironment`, or sync versus async
+        mode) never share a cache entry even when they use the same cache and
+        load a template with the same name and source.
+        """
         hash = sha1(name.encode("utf-8"))
 
         if filename is not None:
             hash.update(f"|{filename}".encode())
+
+        if namespace:
+            hash.update(f"|{namespace}".encode())
 
         return hash.hexdigest()
 
@@ -170,7 +192,8 @@ class BytecodeCache:
         """Return a cache bucket for the given template.  All arguments are
         mandatory but filename may be `None`.
         """
-        key = self.get_cache_key(name, filename)
+        namespace = environment.get_cache_namespace()
+        key = self.get_cache_key(name, filename, namespace)
         checksum = self.get_source_checksum(source)
         bucket = Bucket(environment, key, checksum)
         self.load_bytecode(bucket)
